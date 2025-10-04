@@ -26,6 +26,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
+#include "gl_batch_renderer.h"
+
 cvar_t scr_conalpha = {"scr_conalpha", "0.5", CVAR_ARCHIVE}; // johnfitz
 
 qpic_t *draw_disc;
@@ -454,16 +456,6 @@ static inline void EnsureScrapUploaded (void)
 		Scrap_Upload ();
 }
 
-static inline void EmitQuadAsTris (const basicvertex_t c[4], basicvertex_t *out6)
-{
-	out6[0] = c[0];
-	out6[1] = c[1];
-	out6[2] = c[2];
-	out6[3] = c[2];
-	out6[4] = c[3];
-	out6[5] = c[0];
-}
-
 static inline void FillXYWH (basicvertex_t c[4], float x, float y, float w, float h)
 {
 	c[0].position[0] = x;
@@ -510,18 +502,6 @@ static inline void BindTexture (cb_context_t *cbx, gltexture_t *tex)
 		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &tex->descriptor_set, 0, NULL);
 }
 
-static inline void BindTexturedPipeline (cb_context_t *cbx, qboolean alpha_blend)
-{
-	R_BindPipeline (
-		cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		alpha_blend ? vulkan_globals.basic_blend_pipeline[cbx->render_pass_index] : vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
-}
-
-static inline void BindNoTexBlendPipeline (cb_context_t *cbx)
-{
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_notex_blend_pipeline[cbx->render_pass_index]);
-}
-
 #define CHAR_ST_SIZE	 (1.0f / 16.0f)
 #define CHAR_TEXEL_EPS (0.001f)
 
@@ -530,7 +510,7 @@ static inline void BindNoTexBlendPipeline (cb_context_t *cbx)
 Draw_FillCharacterQuad
 ================
 */
-static void Draw_FillCharacterQuad (float x, float y, char num, basicvertex_t *output, int rotation)
+static void Draw_FillCharacterQuad (float x, float y, char num, basicvertex_t quad[4], int rotation)
 {
 	const int	row = (num >> 4) & 15;
 	const int	col = num & 15;
@@ -545,24 +525,22 @@ static void Draw_FillCharacterQuad (float x, float y, char num, basicvertex_t *o
 	/* rotate the screen-space quad by permuting corners; UVs stay axis-aligned per glyph */
 	const float xy[4][2] = {{x, y}, {x + CHARACTER_SIZE, y}, {x + CHARACTER_SIZE, y + CHARACTER_SIZE}, {x, y + CHARACTER_SIZE}};
 
-	basicvertex_t c[4];
-	memset (c, 0, sizeof (c));
-	c[0].position[0] = xy[(rotation + 0) % 4][0];
-	c[0].position[1] = xy[(rotation + 0) % 4][1];
-	c[0].position[2] = 0.0f;
-	c[1].position[0] = xy[(rotation + 1) % 4][0];
-	c[1].position[1] = xy[(rotation + 1) % 4][1];
-	c[1].position[2] = 0.0f;
-	c[2].position[0] = xy[(rotation + 2) % 4][0];
-	c[2].position[1] = xy[(rotation + 2) % 4][1];
-	c[2].position[2] = 0.0f;
-	c[3].position[0] = xy[(rotation + 3) % 4][0];
-	c[3].position[1] = xy[(rotation + 3) % 4][1];
-	c[3].position[2] = 0.0f;
+	memset (quad, 0, sizeof (basicvertex_t) * 4);
+	quad[0].position[0] = xy[(rotation + 0) % 4][0];
+	quad[0].position[1] = xy[(rotation + 0) % 4][1];
+	quad[0].position[2] = 0.0f;
+	quad[1].position[0] = xy[(rotation + 1) % 4][0];
+	quad[1].position[1] = xy[(rotation + 1) % 4][1];
+	quad[1].position[2] = 0.0f;
+	quad[2].position[0] = xy[(rotation + 2) % 4][0];
+	quad[2].position[1] = xy[(rotation + 2) % 4][1];
+	quad[2].position[2] = 0.0f;
+	quad[3].position[0] = xy[(rotation + 3) % 4][0];
+	quad[3].position[1] = xy[(rotation + 3) % 4][1];
+	quad[3].position[2] = 0.0f;
 
-	FillUV (c, s1, t1, s2, t2);
-	FillColor (c, 255, 255, 255, 255);
-	EmitQuadAsTris (c, output);
+	FillUV (quad, s1, t1, s2, t2);
+	FillColor (quad, 255, 255, 255, 255);
 }
 
 /*
@@ -581,16 +559,9 @@ void Draw_Character (cb_context_t *cbx, float x, float y, int num)
 	if (num == 32)
 		return; // don't waste verts on spaces
 
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
-
-	Draw_FillCharacterQuad (x, y, (char)num, vertices, rotation);
-
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	BindTexturedPipeline (cbx, false);
-	BindTexture (cbx, char_texture);
-	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
+	basicvertex_t quad[4];
+	Draw_FillCharacterQuad (x, y, (char)num, quad, rotation);
+	GL_BatchRenderer_SubmitTexturedQuad (cbx, char_texture, false, quad);
 }
 
 /*
@@ -600,38 +571,19 @@ Draw_String
 */
 void Draw_String (cb_context_t *cbx, float x, float y, const char *str)
 {
-	int			num_verts = 0;
-	int			i;
-	const char *tmp;
-
 	if (y <= -CHARACTER_SIZE)
 		return; // totally off screen
 
-	for (tmp = str; *tmp != 0; ++tmp)
-		if (*tmp != 32)
-			num_verts += 6;
-
-	if (num_verts <= 0)
-		return;
-
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (num_verts * sizeof (basicvertex_t), &buffer, &buffer_offset);
-
-	for (i = 0; *str != 0; ++str)
+	for (; *str != 0; ++str)
 	{
 		if (*str != 32)
 		{
-			Draw_FillCharacterQuad (x, y, *str, vertices + i * 6, 0);
-			i++;
+			basicvertex_t quad[4];
+			Draw_FillCharacterQuad (x, y, *str, quad, 0);
+			GL_BatchRenderer_SubmitTexturedQuad (cbx, char_texture, false, quad);
 		}
 		x += CHARACTER_SIZE;
 	}
-
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	BindTexturedPipeline (cbx, false);
-	BindTexture (cbx, char_texture);
-	vulkan_globals.vk_cmd_draw (cbx->cb, num_verts, 1, 0, 0);
 }
 
 /*
@@ -648,28 +600,18 @@ void Draw_Pic (cb_context_t *cbx, float x, float y, qpic_t *pic, float alpha, qb
 	if (!gl.gltexture)
 		return;
 
-	memcpy (&gl, pic->data, sizeof (glpic_t));
+	basicvertex_t quad[4];
+	memset (quad, 0, sizeof (quad));
+	FillXYWH (quad, x, y, (float)pic->width, (float)pic->height);
+	FillUV (quad, gl.sl, gl.tl, gl.sh, gl.th);
+	FillColor (quad, 255, 255, 255, FloatToByteClamp (alpha));
 
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
-
-	basicvertex_t c[4];
-	memset (c, 0, sizeof (c));
-	FillXYWH (c, x, y, (float)pic->width, (float)pic->height);
-	FillUV (c, gl.sl, gl.tl, gl.sh, gl.th);
-	FillColor (c, 255, 255, 255, FloatToByteClamp (alpha));
-	EmitQuadAsTris (c, vertices);
-
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	BindTexturedPipeline (cbx, alpha_blend);
-	BindTexture (cbx, gl.gltexture);
-	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
+	GL_BatchRenderer_SubmitTexturedQuad (cbx, gl.gltexture, alpha_blend, quad);
 }
 
 void Draw_SubPic (cb_context_t *cbx, float x, float y, float w, float h, qpic_t *pic, float s1, float t1, float s2, float t2, float *rgb, float alpha)
 {
-	glpic_t	 gl;
+	glpic_t	gl;
 	qboolean alpha_blend = alpha < 1.0f;
 	if (alpha <= 0.0f)
 		return;
@@ -683,26 +625,18 @@ void Draw_SubPic (cb_context_t *cbx, float x, float y, float w, float h, qpic_t 
 	if (!gl.gltexture)
 		return;
 
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
-
-	basicvertex_t c[4];
-	memset (c, 0, sizeof (c));
-	FillXYWH (c, x, y, w, h);
+	basicvertex_t quad[4];
+	memset (quad, 0, sizeof (quad));
+	FillXYWH (quad, x, y, w, h);
 	/* lerp sub-rect in atlas space */
 	const float u1 = gl.sl * (1.0f - s1) + s1 * gl.sh;
 	const float v1 = gl.tl * (1.0f - t1) + t1 * gl.th;
 	const float u2 = gl.sl * (1.0f - s_end) + s_end * gl.sh;
 	const float v2 = gl.tl * (1.0f - t_end) + t_end * gl.th;
-	FillUV (c, u1, v1, u2, v2);
-	FillColor (c, (byte)(rgb[0] * 255.0f), (byte)(rgb[1] * 255.0f), (byte)(rgb[2] * 255.0f), FloatToByteClamp (alpha));
-	EmitQuadAsTris (c, vertices);
+	FillUV (quad, u1, v1, u2, v2);
+	FillColor (quad, (byte)(rgb[0] * 255.0f), (byte)(rgb[1] * 255.0f), (byte)(rgb[2] * 255.0f), FloatToByteClamp (alpha));
 
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	BindTexturedPipeline (cbx, alpha_blend);
-	BindTexture (cbx, gl.gltexture);
-	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
+	GL_BatchRenderer_SubmitTexturedQuad (cbx, gl.gltexture, alpha_blend, quad);
 }
 
 /*
@@ -766,21 +700,13 @@ void Draw_TileClear (cb_context_t *cbx, float x, float y, float w, float h)
 	glpic_t gl;
 	memcpy (&gl, draw_backtile->data, sizeof (glpic_t));
 
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
+	basicvertex_t quad[4];
+	memset (quad, 0, sizeof (quad));
+	FillXYWH (quad, x, y, w, h);
+	FillUV (quad, x / 64.0f, y / 64.0f, (x + w) / 64.0f, (y + h) / 64.0f);
+	FillColor (quad, 255, 255, 255, 255);
 
-	basicvertex_t c[4];
-	memset (c, 0, sizeof (c));
-	FillXYWH (c, x, y, w, h);
-	FillUV (c, x / 64.0f, y / 64.0f, (x + w) / 64.0f, (y + h) / 64.0f);
-	FillColor (c, 255, 255, 255, 255);
-	EmitQuadAsTris (c, vertices);
-
-	BindTexturedPipeline (cbx, true /* blend to be safe for tile edges */);
-	BindTexture (cbx, gl.gltexture);
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
+	GL_BatchRenderer_SubmitTexturedQuad (cbx, gl.gltexture, true /* blend to be safe for tile edges */, quad);
 }
 
 /*
@@ -796,19 +722,12 @@ void Draw_Fill (cb_context_t *cbx, float x, float y, float w, float h, int c, fl
 	if (w <= 0 || h <= 0 || alpha <= 0.0f)
 		return;
 
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
+	basicvertex_t quad[4];
+	memset (quad, 0, sizeof (quad));
+	FillXYWH (quad, x, y, w, h);
+	FillColor (quad, pal[c * 4 + 0], pal[c * 4 + 1], pal[c * 4 + 2], FloatToByteClamp (alpha));
 
-	basicvertex_t q[4];
-	memset (q, 0, sizeof (q));
-	FillXYWH (q, x, y, w, h);
-	FillColor (q, pal[c * 4 + 0], pal[c * 4 + 1], pal[c * 4 + 2], FloatToByteClamp (alpha));
-	EmitQuadAsTris (q, vertices);
-
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	BindNoTexBlendPipeline (cbx);
-	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
+	GL_BatchRenderer_SubmitColorQuad (cbx, quad);
 }
 
 /*
@@ -820,19 +739,12 @@ void Draw_FadeScreen (cb_context_t *cbx)
 {
 	GL_SetCanvas (cbx, CANVAS_DEFAULT);
 
-	VkBuffer	   buffer;
-	VkDeviceSize   buffer_offset;
-	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
+	basicvertex_t quad[4];
+	memset (quad, 0, sizeof (quad));
+	FillXYWH (quad, 0.0f, 0.0f, (float)glwidth, (float)glheight);
+	FillColor (quad, 0, 0, 0, 128);
 
-	basicvertex_t q[4];
-	memset (q, 0, sizeof (q));
-	FillXYWH (q, 0.0f, 0.0f, (float)glwidth, (float)glheight);
-	FillColor (q, 0, 0, 0, 128);
-	EmitQuadAsTris (q, vertices);
-
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	BindNoTexBlendPipeline (cbx);
-	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
+	GL_BatchRenderer_SubmitColorQuad (cbx, quad);
 }
 
 /*
@@ -894,6 +806,8 @@ void GL_SetCanvas (cb_context_t *cbx, canvastype newcanvas)
 {
 	if (newcanvas == cbx->current_canvas)
 		return;
+
+	GL_BatchRenderer_Flush (cbx);
 
 	extern vrect_t scr_vrect;
 	float		   s, u, v;
@@ -1031,6 +945,8 @@ Draw_String_3D
 */
 void Draw_String_3D (cb_context_t *cbx, vec3_t coords, float size, const char *str)
 {
+	GL_BatchRenderer_Flush (cbx);
+
 	int			num_verts = 0;
 	int			i;
 	const char *tmp;

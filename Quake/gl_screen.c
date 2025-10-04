@@ -25,6 +25,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
+#include "gl_batch_renderer.h"
+
 #include "cfgfile.h"
 
 #include <setjmp.h>
@@ -1161,6 +1163,8 @@ static void SCR_DrawGUI (void *unused)
 		SCR_DrawConsole (cbx);
 		M_Draw (cbx);
 	}
+
+	GL_BatchRenderer_Flush (cbx);
 
 	if (use_mutex)
 		SDL_UnlockMutex (draw_qcvm_mutex);

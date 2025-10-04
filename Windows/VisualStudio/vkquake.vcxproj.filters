@@ -94,6 +94,9 @@
     <ClCompile Include="..\..\Quake\net_wipx.c">
       <Filter>Network</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Quake\gl_batch_renderer.c">
+      <Filter>Renderer</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Quake\gl_draw.c">
       <Filter>Renderer</Filter>
     </ClCompile>
