@@ -189,6 +189,13 @@ int			screenshot_quality;
 
 task_handle_t prev_end_rendering_task = INVALID_TASK_HANDLE;
 
+static uint32_t raytrace_frame_index = 0;
+static qboolean raytrace_prev_valid = false;
+static vec3_t raytrace_prev_origin;
+static vec3_t raytrace_prev_forward;
+static vec3_t raytrace_prev_right;
+static vec3_t raytrace_prev_down;
+
 #define GET_INSTANCE_PROC_ADDR(entrypoint)                                                              \
 	{                                                                                                   \
 		fp##entrypoint = (PFN_vk##entrypoint)fpGetInstanceProcAddr (vulkan_instance, "vk" #entrypoint); \
@@ -1858,11 +1865,26 @@ void GL_UpdateDescriptorSets (void)
 	input_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	input_image_info.sampler = vulkan_globals.linear_sampler;
 
-	ZEROED_STRUCT (VkDescriptorImageInfo, output_image_info);
-	output_image_info.imageView = color_buffers_view[0];
-	output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ZEROED_STRUCT (VkDescriptorImageInfo, output_image_info);
+        output_image_info.imageView = color_buffers_view[0];
+        output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-	ZEROED_STRUCT (VkDescriptorBufferInfo, palette_octree_info);
+        ZEROED_STRUCT (VkDescriptorImageInfo, accum_image_info);
+        accum_image_info.imageView = color_buffers_view[0];
+        accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo env_image_info;
+        VkDescriptorImageInfo *env_image_ptr = NULL;
+        if (whitetexture && (whitetexture->image_view != VK_NULL_HANDLE))
+        {
+                ZEROED_STRUCT (VkDescriptorImageInfo, env_image_info);
+                env_image_info.imageView = whitetexture->image_view;
+                env_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                env_image_info.sampler = vulkan_globals.linear_sampler;
+                env_image_ptr = &env_image_info;
+        }
+
+        ZEROED_STRUCT (VkDescriptorBufferInfo, palette_octree_info);
 	palette_octree_info.buffer = palette_octree_buffer;
 	palette_octree_info.offset = 0;
 	palette_octree_info.range = VK_WHOLE_SIZE;
@@ -1917,7 +1939,8 @@ void GL_UpdateDescriptorSets (void)
 
         if (vulkan_globals.ray_query && bmodel_tlas)
         {
-                GL_Raytrace_UpdateDescriptorSet (&output_image_info, bmodel_tlas);
+                GL_Raytrace_UpdateDescriptorSet (
+                        &output_image_info, bmodel_tlas, &accum_image_info, env_image_ptr, NULL, NULL);
         }
 }
 
@@ -2587,6 +2610,31 @@ typedef struct end_rendering_parms_s
 	vec3_t	 down;
 } end_rendering_parms_t;
 
+static qboolean Vec3ApproximatelyEqual (const vec3_t a, const vec3_t b, float epsilon)
+{
+        return (fabs (a[0] - b[0]) <= epsilon) && (fabs (a[1] - b[1]) <= epsilon) && (fabs (a[2] - b[2]) <= epsilon);
+}
+
+static qboolean RaytraceCameraChanged (const end_rendering_parms_t *parms)
+{
+        const float epsilon = 1.0f / 2048.0f;
+
+        if (!raytrace_prev_valid)
+                return true;
+
+        if (!Vec3ApproximatelyEqual (parms->origin, raytrace_prev_origin, epsilon))
+                return true;
+        if (!Vec3ApproximatelyEqual (parms->forward, raytrace_prev_forward, epsilon))
+                return true;
+        if (!Vec3ApproximatelyEqual (parms->right, raytrace_prev_right, epsilon))
+                return true;
+        if (!Vec3ApproximatelyEqual (parms->down, raytrace_prev_down, epsilon))
+                return true;
+
+        return false;
+}
+
+
 #define SCREEN_EFFECT_FLAG_SCALE_MASK 0x3
 #define SCREEN_EFFECT_FLAG_SCALE_2X	  0x1
 #define SCREEN_EFFECT_FLAG_SCALE_4X	  0x2
@@ -2664,27 +2712,44 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 
                 if (parms->raytrace && vulkan_globals.ray_query && bmodel_tlas)
                 {
-                        const gl_raytrace_constants_t push_constants = {
-                                1.0f / (float)parms->vid_width,
-                                1.0f / (float)parms->vid_height,
-                                (float)parms->vid_width / (float)parms->vid_height,
-                                parms->origin[0],
-                                parms->origin[1],
-                                parms->origin[2],
-                                parms->forward[0],
-                                parms->forward[1],
-                                parms->forward[2],
-                                parms->right[0],
-                                parms->right[1],
-                                parms->right[2],
-                                parms->down[0],
-                                parms->down[1],
-                                parms->down[2],
-                        };
+                        if (RaytraceCameraChanged (parms))
+                                raytrace_frame_index = 0;
+
+                        gl_raytrace_constants_t push_constants;
+                        memset (&push_constants, 0, sizeof (push_constants));
+                        push_constants.screen_size_rcp_x = 1.0f / (float)parms->vid_width;
+                        push_constants.screen_size_rcp_y = 1.0f / (float)parms->vid_height;
+                        push_constants.aspect_ratio = (float)parms->vid_width / (float)parms->vid_height;
+                        push_constants.origin_x = parms->origin[0];
+                        push_constants.origin_y = parms->origin[1];
+                        push_constants.origin_z = parms->origin[2];
+                        push_constants.forward_x = parms->forward[0];
+                        push_constants.forward_y = parms->forward[1];
+                        push_constants.forward_z = parms->forward[2];
+                        push_constants.right_x = parms->right[0];
+                        push_constants.right_y = parms->right[1];
+                        push_constants.right_z = parms->right[2];
+                        push_constants.down_x = parms->down[0];
+                        push_constants.down_y = parms->down[1];
+                        push_constants.down_z = parms->down[2];
+                        push_constants.aperture = 0.0f;
+                        push_constants.focus_distance = 1000.0f;
+                        push_constants.exposure = 1.0f;
+                        push_constants.frame_index = ++raytrace_frame_index;
+
                         GL_Raytrace_Render (cbx, parms->vid_width, parms->vid_height, &push_constants);
+
+                        VectorCopy (parms->origin, raytrace_prev_origin);
+                        VectorCopy (parms->forward, raytrace_prev_forward);
+                        VectorCopy (parms->right, raytrace_prev_right);
+                        VectorCopy (parms->down, raytrace_prev_down);
+                        raytrace_prev_valid = true;
                 }
                 else
                 {
+                        raytrace_prev_valid = false;
+                        raytrace_frame_index = 0;
+
                         vkCmdBindDescriptorSets (
                                 cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1,
                                 &vulkan_globals.screen_effects_desc_set, 0, NULL);
