@@ -52,23 +52,6 @@ static const byte pic_nul_data[8][8] = {
 	{0, 0, 0, 0, 252, 252, 252, 252}, {0, 0, 0, 0, 252, 252, 252, 252}, {0, 0, 0, 0, 252, 252, 252, 252}, {0, 0, 0, 0, 252, 252, 252, 252},
 };
 
-#if 0 // vso - unused
-static const byte pic_stipple_data[8][8] = {
-	{255, 0, 0, 0, 255, 0, 0, 0}, {0, 0, 255, 0, 0, 0, 255, 0}, {255, 0, 0, 0, 255, 0, 0, 0}, {0, 0, 255, 0, 0, 0, 255, 0},
-	{255, 0, 0, 0, 255, 0, 0, 0}, {0, 0, 255, 0, 0, 0, 255, 0}, {255, 0, 0, 0, 255, 0, 0, 0}, {0, 0, 255, 0, 0, 0, 255, 0},
-};
-
-static const byte pic_crosshair_data[8][8] = {
-	{255, 255, 255, 255, 255, 255, 255, 255},
-	{255, 255, 255, 8, 9, 255, 255, 255},
-	{255, 255, 255, 6, 8, 2, 255, 255},
-	{255, 6, 8, 8, 6, 8, 8, 255},
-	{255, 255, 2, 8, 8, 2, 2, 2},
-	{255, 255, 255, 7, 8, 2, 255, 255},
-	{255, 255, 255, 255, 2, 2, 255, 255},
-	{255, 255, 255, 255, 255, 255, 255, 255},
-};
-#endif
 // johnfitz
 
 typedef struct
@@ -126,7 +109,8 @@ int Scrap_AllocBlock (int w, int h, int *x, int *y)
 	{
 		best = BLOCK_HEIGHT;
 
-		for (i = 0; i < BLOCK_WIDTH - w; i++)
+		/* allow placement at the last valid column as well */
+		for (i = 0; i <= BLOCK_WIDTH - w; i++)
 		{
 			best2 = 0;
 
@@ -234,8 +218,8 @@ qpic_t *Draw_PicFromWad2 (const char *name, unsigned int texflags)
 		// johnfitz -- no longer go from 0.01 to 0.99
 		gl.sl = x / (float)BLOCK_WIDTH;
 		gl.sh = (x + p->width) / (float)BLOCK_WIDTH;
-		gl.tl = y / (float)BLOCK_WIDTH;
-		gl.th = (y + p->height) / (float)BLOCK_WIDTH;
+		gl.tl = y / (float)BLOCK_HEIGHT;
+		gl.th = (y + p->height) / (float)BLOCK_HEIGHT;
 	}
 	else
 	{
@@ -252,7 +236,7 @@ qpic_t *Draw_PicFromWad2 (const char *name, unsigned int texflags)
 	}
 
 	menu_numcachepics++;
-	strcpy (pic->name, name);
+	q_snprintf (pic->name, sizeof (pic->name), "%s", name);
 	pic->pic = *p;
 	memcpy (pic->pic.data, &gl, sizeof (glpic_t));
 
@@ -306,7 +290,7 @@ qpic_t *Draw_TryCachePic (const char *path, unsigned int texflags)
 	SwapPic (dat);
 
 	menu_numcachepics++;
-	strcpy (pic->name, path);
+	q_snprintf (pic->name, sizeof (pic->name), "%s", path);
 
 	// HACK HACK HACK --- we need to keep the bytes for
 	// the translatable player picture just for the menu
@@ -451,61 +435,134 @@ void Draw_Init (void)
 //
 //==============================================================================
 
-/*
+/* ==============================================================================
+   The following code is making draw code explicit and not duplicated
+   ============================================================================== */
+
+static inline byte FloatToByteClamp (float a)
+{
+	if (a <= 0.0f)
+		return 0;
+	if (a >= 1.0f)
+		return 255;
+	return (byte)(a * 255.0f + 0.5f);
+}
+
+static inline void EnsureScrapUploaded (void)
+{
+	if (scrap_dirty)
+		Scrap_Upload ();
+}
+
+static inline void EmitQuadAsTris (const basicvertex_t c[4], basicvertex_t *out6)
+{
+	out6[0] = c[0];
+	out6[1] = c[1];
+	out6[2] = c[2];
+	out6[3] = c[2];
+	out6[4] = c[3];
+	out6[5] = c[0];
+}
+
+static inline void FillXYWH (basicvertex_t c[4], float x, float y, float w, float h)
+{
+	c[0].position[0] = x;
+	c[0].position[1] = y;
+	c[0].position[2] = 0.0f;
+	c[1].position[0] = x + w;
+	c[1].position[1] = y;
+	c[1].position[2] = 0.0f;
+	c[2].position[0] = x + w;
+	c[2].position[1] = y + h;
+	c[2].position[2] = 0.0f;
+	c[3].position[0] = x;
+	c[3].position[1] = y + h;
+	c[3].position[2] = 0.0f;
+}
+
+static inline void FillUV (basicvertex_t c[4], float s1, float t1, float s2, float t2)
+{
+	c[0].texcoord[0] = s1;
+	c[0].texcoord[1] = t1;
+	c[1].texcoord[0] = s2;
+	c[1].texcoord[1] = t1;
+	c[2].texcoord[0] = s2;
+	c[2].texcoord[1] = t2;
+	c[3].texcoord[0] = s1;
+	c[3].texcoord[1] = t2;
+}
+
+static inline void FillColor (basicvertex_t c[4], byte r, byte g, byte b, byte a)
+{
+	int i;
+	for (i = 0; i < 4; ++i)
+	{
+		c[i].color[0] = r;
+		c[i].color[1] = g;
+		c[i].color[2] = b;
+		c[i].color[3] = a;
+	}
+}
+
+static inline void BindTexture (cb_context_t *cbx, gltexture_t *tex)
+{
+	vulkan_globals.vk_cmd_bind_descriptor_sets (
+		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &tex->descriptor_set, 0, NULL);
+}
+
+static inline void BindTexturedPipeline (cb_context_t *cbx, qboolean alpha_blend)
+{
+	R_BindPipeline (
+		cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
+		alpha_blend ? vulkan_globals.basic_blend_pipeline[cbx->render_pass_index] : vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
+}
+
+static inline void BindNoTexBlendPipeline (cb_context_t *cbx)
+{
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_notex_blend_pipeline[cbx->render_pass_index]);
+}
+
+#define CHAR_ST_SIZE	 (1.0f / 16.0f)
+#define CHAR_TEXEL_EPS (0.001f)
+
+	/*
 ================
 Draw_FillCharacterQuad
 ================
 */
 static void Draw_FillCharacterQuad (float x, float y, char num, basicvertex_t *output, int rotation)
 {
-	const int	row = num >> 4;
+	const int	row = (num >> 4) & 15;
 	const int	col = num & 15;
-	const float st_size = 1.0f / 16.0f;
-	// Fixes sampling into previous/next character because of float rounding
-	const float texel_offset = 0.001f;
-	const float frow = row * st_size;
-	const float fcol = col * st_size;
+	const float frow = row * CHAR_ST_SIZE;
+	const float fcol = col * CHAR_ST_SIZE;
 
-	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 255, sizeof (corner_verts));
+	const float s1 = fcol + CHAR_TEXEL_EPS;
+	const float t1 = frow + CHAR_TEXEL_EPS;
+	const float s2 = fcol + CHAR_ST_SIZE - CHAR_TEXEL_EPS;
+	const float t2 = frow + CHAR_ST_SIZE - CHAR_TEXEL_EPS;
 
-	float texcoords[4][2] = {
-		{x, y},
-		{x + CHARACTER_SIZE, y},
-		{x + CHARACTER_SIZE, y + CHARACTER_SIZE},
-		{x, y + CHARACTER_SIZE},
-	};
+	/* rotate the screen-space quad by permuting corners; UVs stay axis-aligned per glyph */
+	const float xy[4][2] = {{x, y}, {x + CHARACTER_SIZE, y}, {x + CHARACTER_SIZE, y + CHARACTER_SIZE}, {x, y + CHARACTER_SIZE}};
 
-	corner_verts[0].position[0] = texcoords[(rotation + 0) % 4][0];
-	corner_verts[0].position[1] = texcoords[(rotation + 0) % 4][1];
-	corner_verts[0].position[2] = 0.0f;
-	corner_verts[0].texcoord[0] = fcol + texel_offset;
-	corner_verts[0].texcoord[1] = frow + texel_offset;
+	basicvertex_t c[4];
+	memset (c, 0, sizeof (c));
+	c[0].position[0] = xy[(rotation + 0) % 4][0];
+	c[0].position[1] = xy[(rotation + 0) % 4][1];
+	c[0].position[2] = 0.0f;
+	c[1].position[0] = xy[(rotation + 1) % 4][0];
+	c[1].position[1] = xy[(rotation + 1) % 4][1];
+	c[1].position[2] = 0.0f;
+	c[2].position[0] = xy[(rotation + 2) % 4][0];
+	c[2].position[1] = xy[(rotation + 2) % 4][1];
+	c[2].position[2] = 0.0f;
+	c[3].position[0] = xy[(rotation + 3) % 4][0];
+	c[3].position[1] = xy[(rotation + 3) % 4][1];
+	c[3].position[2] = 0.0f;
 
-	corner_verts[1].position[0] = texcoords[(rotation + 1) % 4][0];
-	corner_verts[1].position[1] = texcoords[(rotation + 1) % 4][1];
-	corner_verts[1].position[2] = 0.0f;
-	corner_verts[1].texcoord[0] = fcol + st_size - texel_offset;
-	corner_verts[1].texcoord[1] = frow + texel_offset;
-
-	corner_verts[2].position[0] = texcoords[(rotation + 2) % 4][0];
-	corner_verts[2].position[1] = texcoords[(rotation + 2) % 4][1];
-	corner_verts[2].position[2] = 0.0f;
-	corner_verts[2].texcoord[0] = fcol + st_size - texel_offset;
-	corner_verts[2].texcoord[1] = frow + st_size - texel_offset;
-
-	corner_verts[3].position[0] = texcoords[(rotation + 3) % 4][0];
-	corner_verts[3].position[1] = texcoords[(rotation + 3) % 4][1];
-	corner_verts[3].position[2] = 0.0f;
-	corner_verts[3].texcoord[0] = fcol + texel_offset;
-	corner_verts[3].texcoord[1] = frow + st_size - texel_offset;
-
-	output[0] = corner_verts[0];
-	output[1] = corner_verts[1];
-	output[2] = corner_verts[2];
-	output[3] = corner_verts[2];
-	output[4] = corner_verts[3];
-	output[5] = corner_verts[0];
+	FillUV (c, s1, t1, s2, t2);
+	FillColor (c, 255, 255, 255, 255);
+	EmitQuadAsTris (c, output);
 }
 
 /*
@@ -531,9 +588,8 @@ void Draw_Character (cb_context_t *cbx, float x, float y, int num)
 	Draw_FillCharacterQuad (x, y, (char)num, vertices, rotation);
 
 	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
-	vulkan_globals.vk_cmd_bind_descriptor_sets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &char_texture->descriptor_set, 0, NULL);
+	BindTexturedPipeline (cbx, false);
+	BindTexture (cbx, char_texture);
 	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
 }
 
@@ -555,6 +611,9 @@ void Draw_String (cb_context_t *cbx, float x, float y, const char *str)
 		if (*tmp != 32)
 			num_verts += 6;
 
+	if (num_verts <= 0)
+		return;
+
 	VkBuffer	   buffer;
 	VkDeviceSize   buffer_offset;
 	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (num_verts * sizeof (basicvertex_t), &buffer, &buffer_offset);
@@ -570,9 +629,8 @@ void Draw_String (cb_context_t *cbx, float x, float y, const char *str)
 	}
 
 	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
-	vulkan_globals.vk_cmd_bind_descriptor_sets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &char_texture->descriptor_set, 0, NULL);
+	BindTexturedPipeline (cbx, false);
+	BindTexture (cbx, char_texture);
 	vulkan_globals.vk_cmd_draw (cbx->cb, num_verts, 1, 0, 0);
 }
 
@@ -584,76 +642,43 @@ Draw_Pic -- johnfitz -- modified
 void Draw_Pic (cb_context_t *cbx, float x, float y, qpic_t *pic, float alpha, qboolean alpha_blend)
 {
 	glpic_t gl;
-	int		i;
+	alpha = CLAMP (0.0f, alpha, 1.0f);
+	EnsureScrapUploaded ();
+	memcpy (&gl, pic->data, sizeof (glpic_t));
+	if (!gl.gltexture)
+		return;
 
-	if (scrap_dirty)
-		Scrap_Upload ();
 	memcpy (&gl, pic->data, sizeof (glpic_t));
 
 	VkBuffer	   buffer;
 	VkDeviceSize   buffer_offset;
 	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 
-	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 255, sizeof (corner_verts));
+	basicvertex_t c[4];
+	memset (c, 0, sizeof (c));
+	FillXYWH (c, x, y, (float)pic->width, (float)pic->height);
+	FillUV (c, gl.sl, gl.tl, gl.sh, gl.th);
+	FillColor (c, 255, 255, 255, FloatToByteClamp (alpha));
+	EmitQuadAsTris (c, vertices);
 
-	corner_verts[0].position[0] = x;
-	corner_verts[0].position[1] = y;
-	corner_verts[0].position[2] = 0.0f;
-	corner_verts[0].texcoord[0] = gl.sl;
-	corner_verts[0].texcoord[1] = gl.tl;
-
-	corner_verts[1].position[0] = x + pic->width;
-	corner_verts[1].position[1] = y;
-	corner_verts[1].position[2] = 0.0f;
-	corner_verts[1].texcoord[0] = gl.sh;
-	corner_verts[1].texcoord[1] = gl.tl;
-
-	corner_verts[2].position[0] = x + pic->width;
-	corner_verts[2].position[1] = y + pic->height;
-	corner_verts[2].position[2] = 0.0f;
-	corner_verts[2].texcoord[0] = gl.sh;
-	corner_verts[2].texcoord[1] = gl.th;
-
-	corner_verts[3].position[0] = x;
-	corner_verts[3].position[1] = y + pic->height;
-	corner_verts[3].position[2] = 0.0f;
-	corner_verts[3].texcoord[0] = gl.sl;
-	corner_verts[3].texcoord[1] = gl.th;
-
-	for (i = 0; i < 4; ++i)
-		corner_verts[i].color[3] = alpha * 255.0f;
-
-	vertices[0] = corner_verts[0];
-	vertices[1] = corner_verts[1];
-	vertices[2] = corner_verts[2];
-	vertices[3] = corner_verts[2];
-	vertices[4] = corner_verts[3];
-	vertices[5] = corner_verts[0];
-
-	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	if (alpha_blend)
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_blend_pipeline[cbx->render_pass_index]);
-	else
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
-	vkCmdBindDescriptorSets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &gl.gltexture->descriptor_set, 0, NULL);
-	vkCmdDraw (cbx->cb, 6, 1, 0, 0);
+	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
+	BindTexturedPipeline (cbx, alpha_blend);
+	BindTexture (cbx, gl.gltexture);
+	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
 }
 
 void Draw_SubPic (cb_context_t *cbx, float x, float y, float w, float h, qpic_t *pic, float s1, float t1, float s2, float t2, float *rgb, float alpha)
 {
 	glpic_t	 gl;
 	qboolean alpha_blend = alpha < 1.0f;
-	int		 i;
 	if (alpha <= 0.0f)
 		return;
 
-	s2 += s1;
-	t2 += t1;
+	/* s2/t2 are extents; convert to end coords here */
+	const float s_end = s1 + s2;
+	const float t_end = t1 + t2;
 
-	if (scrap_dirty)
-		Scrap_Upload ();
+	EnsureScrapUploaded ();
 	memcpy (&gl, pic->data, sizeof (glpic_t));
 	if (!gl.gltexture)
 		return;
@@ -662,56 +687,22 @@ void Draw_SubPic (cb_context_t *cbx, float x, float y, float w, float h, qpic_t 
 	VkDeviceSize   buffer_offset;
 	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 
-	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 255, sizeof (corner_verts));
+	basicvertex_t c[4];
+	memset (c, 0, sizeof (c));
+	FillXYWH (c, x, y, w, h);
+	/* lerp sub-rect in atlas space */
+	const float u1 = gl.sl * (1.0f - s1) + s1 * gl.sh;
+	const float v1 = gl.tl * (1.0f - t1) + t1 * gl.th;
+	const float u2 = gl.sl * (1.0f - s_end) + s_end * gl.sh;
+	const float v2 = gl.tl * (1.0f - t_end) + t_end * gl.th;
+	FillUV (c, u1, v1, u2, v2);
+	FillColor (c, (byte)(rgb[0] * 255.0f), (byte)(rgb[1] * 255.0f), (byte)(rgb[2] * 255.0f), FloatToByteClamp (alpha));
+	EmitQuadAsTris (c, vertices);
 
-	corner_verts[0].position[0] = x;
-	corner_verts[0].position[1] = y;
-	corner_verts[0].position[2] = 0.0f;
-	corner_verts[0].texcoord[0] = gl.sl * (1 - s1) + s1 * gl.sh;
-	corner_verts[0].texcoord[1] = gl.tl * (1 - t1) + t1 * gl.th;
-
-	corner_verts[1].position[0] = x + w;
-	corner_verts[1].position[1] = y;
-	corner_verts[1].position[2] = 0.0f;
-	corner_verts[1].texcoord[0] = gl.sl * (1 - s2) + s2 * gl.sh;
-	corner_verts[1].texcoord[1] = gl.tl * (1 - t1) + t1 * gl.th;
-
-	corner_verts[2].position[0] = x + w;
-	corner_verts[2].position[1] = y + h;
-	corner_verts[2].position[2] = 0.0f;
-	corner_verts[2].texcoord[0] = gl.sl * (1 - s2) + s2 * gl.sh;
-	corner_verts[2].texcoord[1] = gl.tl * (1 - t2) + t2 * gl.th;
-
-	corner_verts[3].position[0] = x;
-	corner_verts[3].position[1] = y + h;
-	corner_verts[3].position[2] = 0.0f;
-	corner_verts[3].texcoord[0] = gl.sl * (1 - s1) + s1 * gl.sh;
-	corner_verts[3].texcoord[1] = gl.tl * (1 - t2) + t2 * gl.th;
-
-	for (i = 0; i < 4; ++i)
-	{
-		corner_verts[i].color[0] = rgb[0] * 255.0f;
-		corner_verts[i].color[1] = rgb[1] * 255.0f;
-		corner_verts[i].color[2] = rgb[2] * 255.0f;
-		corner_verts[i].color[3] = alpha * 255.0f;
-	}
-
-	vertices[0] = corner_verts[0];
-	vertices[1] = corner_verts[1];
-	vertices[2] = corner_verts[2];
-	vertices[3] = corner_verts[2];
-	vertices[4] = corner_verts[3];
-	vertices[5] = corner_verts[0];
-
-	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	if (alpha_blend)
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_blend_pipeline[cbx->render_pass_index]);
-	else
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
-	vkCmdBindDescriptorSets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &gl.gltexture->descriptor_set, 0, NULL);
-	vkCmdDraw (cbx->cb, 6, 1, 0, 0);
+	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
+	BindTexturedPipeline (cbx, alpha_blend);
+	BindTexture (cbx, gl.gltexture);
+	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
 }
 
 /*
@@ -779,45 +770,17 @@ void Draw_TileClear (cb_context_t *cbx, float x, float y, float w, float h)
 	VkDeviceSize   buffer_offset;
 	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 
-	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 255, sizeof (corner_verts));
+	basicvertex_t c[4];
+	memset (c, 0, sizeof (c));
+	FillXYWH (c, x, y, w, h);
+	FillUV (c, x / 64.0f, y / 64.0f, (x + w) / 64.0f, (y + h) / 64.0f);
+	FillColor (c, 255, 255, 255, 255);
+	EmitQuadAsTris (c, vertices);
 
-	corner_verts[0].position[0] = x;
-	corner_verts[0].position[1] = y;
-	corner_verts[0].position[2] = 0.0f;
-	corner_verts[0].texcoord[0] = x / 64.0;
-	corner_verts[0].texcoord[1] = y / 64.0;
-
-	corner_verts[1].position[0] = x + w;
-	corner_verts[1].position[1] = y;
-	corner_verts[1].position[2] = 0.0f;
-	corner_verts[1].texcoord[0] = (x + w) / 64.0;
-	corner_verts[1].texcoord[1] = y / 64.0;
-
-	corner_verts[2].position[0] = x + w;
-	corner_verts[2].position[1] = y + h;
-	corner_verts[2].position[2] = 0.0f;
-	corner_verts[2].texcoord[0] = (x + w) / 64.0;
-	corner_verts[2].texcoord[1] = (y + h) / 64.0;
-
-	corner_verts[3].position[0] = x;
-	corner_verts[3].position[1] = y + h;
-	corner_verts[3].position[2] = 0.0f;
-	corner_verts[3].texcoord[0] = x / 64.0;
-	corner_verts[3].texcoord[1] = (y + h) / 64.0;
-
-	vertices[0] = corner_verts[0];
-	vertices[1] = corner_verts[1];
-	vertices[2] = corner_verts[2];
-	vertices[3] = corner_verts[2];
-	vertices[4] = corner_verts[3];
-	vertices[5] = corner_verts[0];
-
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_blend_pipeline[cbx->render_pass_index]);
-	vkCmdBindDescriptorSets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &gl.gltexture->descriptor_set, 0, NULL);
-	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	vkCmdDraw (cbx->cb, 6, 1, 0, 0);
+	BindTexturedPipeline (cbx, true /* blend to be safe for tile edges */);
+	BindTexture (cbx, gl.gltexture);
+	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
+	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
 }
 
 /*
@@ -829,46 +792,23 @@ Fills a box of pixels with a single color
 */
 void Draw_Fill (cb_context_t *cbx, float x, float y, float w, float h, int c, float alpha) // johnfitz -- added alpha
 {
-	int	  i;
 	byte *pal = (byte *)d_8to24table; // johnfitz -- use d_8to24table instead of host_basepal
+	if (w <= 0 || h <= 0 || alpha <= 0.0f)
+		return;
 
 	VkBuffer	   buffer;
 	VkDeviceSize   buffer_offset;
 	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 
-	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 0, sizeof (corner_verts));
+	basicvertex_t q[4];
+	memset (q, 0, sizeof (q));
+	FillXYWH (q, x, y, w, h);
+	FillColor (q, pal[c * 4 + 0], pal[c * 4 + 1], pal[c * 4 + 2], FloatToByteClamp (alpha));
+	EmitQuadAsTris (q, vertices);
 
-	corner_verts[0].position[0] = x;
-	corner_verts[0].position[1] = y;
-
-	corner_verts[1].position[0] = x + w;
-	corner_verts[1].position[1] = y;
-
-	corner_verts[2].position[0] = x + w;
-	corner_verts[2].position[1] = y + h;
-
-	corner_verts[3].position[0] = x;
-	corner_verts[3].position[1] = y + h;
-
-	for (i = 0; i < 4; ++i)
-	{
-		corner_verts[i].color[0] = pal[c * 4];
-		corner_verts[i].color[1] = pal[c * 4 + 1];
-		corner_verts[i].color[2] = pal[c * 4 + 2];
-		corner_verts[i].color[3] = alpha * 255;
-	}
-
-	vertices[0] = corner_verts[0];
-	vertices[1] = corner_verts[1];
-	vertices[2] = corner_verts[2];
-	vertices[3] = corner_verts[2];
-	vertices[4] = corner_verts[3];
-	vertices[5] = corner_verts[0];
-
-	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_notex_blend_pipeline[cbx->render_pass_index]);
-	vkCmdDraw (cbx->cb, 6, 1, 0, 0);
+	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
+	BindNoTexBlendPipeline (cbx);
+	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
 }
 
 /*
@@ -878,42 +818,21 @@ Draw_FadeScreen
 */
 void Draw_FadeScreen (cb_context_t *cbx)
 {
-	int i;
-
 	GL_SetCanvas (cbx, CANVAS_DEFAULT);
 
 	VkBuffer	   buffer;
 	VkDeviceSize   buffer_offset;
 	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 
-	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 0, sizeof (corner_verts));
+	basicvertex_t q[4];
+	memset (q, 0, sizeof (q));
+	FillXYWH (q, 0.0f, 0.0f, (float)glwidth, (float)glheight);
+	FillColor (q, 0, 0, 0, 128);
+	EmitQuadAsTris (q, vertices);
 
-	corner_verts[0].position[0] = 0.0f;
-	corner_verts[0].position[1] = 0.0f;
-
-	corner_verts[1].position[0] = glwidth;
-	corner_verts[1].position[1] = 0.0f;
-
-	corner_verts[2].position[0] = glwidth;
-	corner_verts[2].position[1] = glheight;
-
-	corner_verts[3].position[0] = 0.0f;
-	corner_verts[3].position[1] = glheight;
-
-	for (i = 0; i < 4; ++i)
-		corner_verts[i].color[3] = 128;
-
-	vertices[0] = corner_verts[0];
-	vertices[1] = corner_verts[1];
-	vertices[2] = corner_verts[2];
-	vertices[3] = corner_verts[2];
-	vertices[4] = corner_verts[3];
-	vertices[5] = corner_verts[0];
-
-	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_notex_blend_pipeline[cbx->render_pass_index]);
-	vkCmdDraw (cbx->cb, 6, 1, 0, 0);
+	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
+	BindNoTexBlendPipeline (cbx);
+	vulkan_globals.vk_cmd_draw (cbx->cb, 6, 1, 0, 0);
 }
 
 /*
@@ -1077,7 +996,7 @@ static void Draw_FillCharacterQuad_3D (vec3_t coords, float xoff, float yoff, fl
 	tile_size = 0.0625;
 
 	basicvertex_t corner_verts[4];
-	memset (&corner_verts, 255, sizeof (corner_verts));
+	memset (&corner_verts, 0, sizeof (corner_verts));
 
 	VectorMA (coords, size / 2 - yoff, vup, &corner_verts[0].position[0]);
 	VectorMA (&corner_verts[0].position[0], -size / 2 + xoff, vright, &corner_verts[0].position[0]);
@@ -1095,6 +1014,7 @@ static void Draw_FillCharacterQuad_3D (vec3_t coords, float xoff, float yoff, fl
 	VectorMA (&corner_verts[2].position[0], -size, vright, &corner_verts[3].position[0]);
 	corner_verts[3].texcoord[0] = fcol;
 	corner_verts[3].texcoord[1] = frow + tile_size;
+	FillColor (corner_verts, 255, 255, 255, 255);
 
 	output[0] = corner_verts[0];
 	output[1] = corner_verts[1];
@@ -1138,7 +1058,6 @@ void Draw_String_3D (cb_context_t *cbx, vec3_t coords, float size, const char *s
 
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_alphatest_pipeline[cbx->render_pass_index]);
 	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
-	vulkan_globals.vk_cmd_bind_descriptor_sets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &char_texture->descriptor_set, 0, NULL);
+	BindTexture (cbx, char_texture);
 	vulkan_globals.vk_cmd_draw (cbx->cb, num_verts, 1, 0, 0);
 }
