@@ -1,8 +1,6 @@
 #include "quakedef.h"
 #include "gl_traceray.h"
 
-#if defined(_DEBUG)
-
 void GL_TraceRay_UpdateDescriptorSet (const VkDescriptorImageInfo *output_image_info, VkAccelerationStructureKHR tlas)
 {
         if (!vulkan_globals.ray_query || (vulkan_globals.ray_debug_set_layout.handle == VK_NULL_HANDLE) || !output_image_info)
@@ -67,5 +65,3 @@ void GL_TraceRay_Render (cb_context_t *cbx, int width, int height, const gl_trac
         const uint32_t group_count_y = (uint32_t)((height + 7) / 8);
         vkCmdDispatch (cbx->cb, group_count_x, group_count_y, 1);
 }
-
-#endif /* _DEBUG */
