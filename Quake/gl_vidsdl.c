@@ -80,6 +80,8 @@ static void GL_InitInstance (void);
 static void GL_InitDevice (void);
 static void GL_CreateFrameBuffers (void);
 static void GL_DestroyRenderResources (void);
+static void GL_CreateRaytraceAccumulationImage (void);
+static void GL_DestroyRaytraceAccumulationImage (void);
 
 viddef_t		vid; // global video state
 modestate_t		modestate = MS_UNINIT;
@@ -142,6 +144,10 @@ static VkDescriptorSet	postprocess_descriptor_set;
 static VkBuffer			palette_colors_buffer;
 static VkBufferView		palette_buffer_view;
 static VkBuffer			palette_octree_buffer;
+static VkImage		raytrace_accum_image;
+static vulkan_memory_t	raytrace_accum_memory;
+static VkImageView	raytrace_accum_image_view;
+static qboolean	raytrace_accum_image_initialized = false;
 
 static PFN_vkGetInstanceProcAddr					  fpGetInstanceProcAddr;
 static PFN_vkGetDeviceProcAddr						  fpGetDeviceProcAddr;
@@ -1826,6 +1832,104 @@ static void GL_CreateColorBuffer (void)
 		Sys_Printf ("AA disabled\n");
 }
 
+
+static void GL_CreateRaytraceAccumulationImage (void)
+{
+        raytrace_accum_image_initialized = false;
+
+        if (!vulkan_globals.ray_query || !vid.width || !vid.height)
+                return;
+
+        if (raytrace_accum_image != VK_NULL_HANDLE)
+                GL_DestroyRaytraceAccumulationImage ();
+
+        VkResult err;
+
+        ZEROED_STRUCT (VkImageCreateInfo, image_create_info);
+        image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_create_info.imageType = VK_IMAGE_TYPE_2D;
+        image_create_info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        image_create_info.extent.width = vid.width;
+        image_create_info.extent.height = vid.height;
+        image_create_info.extent.depth = 1;
+        image_create_info.mipLevels = 1;
+        image_create_info.arrayLayers = 1;
+        image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_create_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+        err = vkCreateImage (vulkan_globals.device, &image_create_info, NULL, &raytrace_accum_image);
+        if (err != VK_SUCCESS)
+        {
+                raytrace_accum_image = VK_NULL_HANDLE;
+                return;
+        }
+
+        GL_SetObjectName ((uint64_t)raytrace_accum_image, VK_OBJECT_TYPE_IMAGE, "Raytrace Accum");
+
+        VkMemoryRequirements memory_requirements;
+        vkGetImageMemoryRequirements (vulkan_globals.device, raytrace_accum_image, &memory_requirements);
+
+        ZEROED_STRUCT (VkMemoryAllocateInfo, memory_allocate_info);
+        memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        memory_allocate_info.allocationSize = memory_requirements.size;
+        memory_allocate_info.memoryTypeIndex = GL_MemoryTypeFromProperties (
+                memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+
+        R_AllocateVulkanMemory (&raytrace_accum_memory, &memory_allocate_info, VULKAN_MEMORY_TYPE_DEVICE, &num_vulkan_misc_allocations);
+        GL_SetObjectName ((uint64_t)raytrace_accum_memory.handle, VK_OBJECT_TYPE_DEVICE_MEMORY, "Raytrace Accum Memory");
+
+        err = vkBindImageMemory (vulkan_globals.device, raytrace_accum_image, raytrace_accum_memory.handle, 0);
+        if (err != VK_SUCCESS)
+        {
+                GL_DestroyRaytraceAccumulationImage ();
+                return;
+        }
+
+        ZEROED_STRUCT (VkImageViewCreateInfo, image_view_create_info);
+        image_view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        image_view_create_info.image = raytrace_accum_image;
+        image_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        image_view_create_info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        image_view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        image_view_create_info.subresourceRange.baseMipLevel = 0;
+        image_view_create_info.subresourceRange.levelCount = 1;
+        image_view_create_info.subresourceRange.baseArrayLayer = 0;
+        image_view_create_info.subresourceRange.layerCount = 1;
+
+        err = vkCreateImageView (vulkan_globals.device, &image_view_create_info, NULL, &raytrace_accum_image_view);
+        if (err != VK_SUCCESS)
+        {
+                GL_DestroyRaytraceAccumulationImage ();
+                return;
+        }
+
+        GL_SetObjectName ((uint64_t)raytrace_accum_image_view, VK_OBJECT_TYPE_IMAGE_VIEW, "Raytrace Accum View");
+}
+
+static void GL_DestroyRaytraceAccumulationImage (void)
+{
+        if (raytrace_accum_image_view != VK_NULL_HANDLE)
+        {
+                vkDestroyImageView (vulkan_globals.device, raytrace_accum_image_view, NULL);
+                raytrace_accum_image_view = VK_NULL_HANDLE;
+        }
+
+        if (raytrace_accum_image != VK_NULL_HANDLE)
+        {
+                vkDestroyImage (vulkan_globals.device, raytrace_accum_image, NULL);
+                raytrace_accum_image = VK_NULL_HANDLE;
+        }
+
+        if (raytrace_accum_memory.handle != VK_NULL_HANDLE)
+        {
+                R_FreeVulkanMemory (&raytrace_accum_memory, &num_vulkan_misc_allocations);
+                raytrace_accum_memory.handle = VK_NULL_HANDLE;
+        }
+
+        raytrace_accum_image_initialized = false;
+}
+
 /*
 ===============
 GL_UpdateDescriptorSets
@@ -1865,16 +1969,22 @@ void GL_UpdateDescriptorSets (void)
 	input_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	input_image_info.sampler = vulkan_globals.linear_sampler;
 
-        ZEROED_STRUCT (VkDescriptorImageInfo, output_image_info);
-        output_image_info.imageView = color_buffers_view[0];
-        output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	ZEROED_STRUCT (VkDescriptorImageInfo, output_image_info);
+	output_image_info.imageView = color_buffers_view[0];
+	output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        ZEROED_STRUCT (VkDescriptorImageInfo, accum_image_info);
-        accum_image_info.imageView = color_buffers_view[0];
-        accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	VkDescriptorImageInfo accum_image_info;
+	VkDescriptorImageInfo *accum_image_ptr = NULL;
+	if (raytrace_accum_image_view != VK_NULL_HANDLE)
+	{
+		ZEROED_STRUCT (VkDescriptorImageInfo, accum_image_info);
+		accum_image_info.imageView = raytrace_accum_image_view;
+		accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		accum_image_ptr = &accum_image_info;
+	}
 
-        VkDescriptorImageInfo env_image_info;
-        VkDescriptorImageInfo *env_image_ptr = NULL;
+	VkDescriptorImageInfo env_image_info;
+	VkDescriptorImageInfo *env_image_ptr = NULL;
         if (whitetexture && (whitetexture->image_view != VK_NULL_HANDLE))
         {
                 ZEROED_STRUCT (VkDescriptorImageInfo, env_image_info);
@@ -1937,11 +2047,11 @@ void GL_UpdateDescriptorSets (void)
 
 	vkUpdateDescriptorSets (vulkan_globals.device, countof (screen_effects_writes), screen_effects_writes, 0, NULL);
 
-        if (vulkan_globals.ray_query && bmodel_tlas)
-        {
-                GL_Raytrace_UpdateDescriptorSet (
-                        &output_image_info, bmodel_tlas, &accum_image_info, env_image_ptr, NULL, NULL);
-        }
+	if (vulkan_globals.ray_query && bmodel_tlas)
+	{
+		GL_Raytrace_UpdateDescriptorSet (
+			&output_image_info, bmodel_tlas, accum_image_ptr, env_image_ptr, NULL, NULL);
+	}
 }
 
 /*
@@ -2277,6 +2387,7 @@ static void GL_CreateRenderResources (void)
 	}
 
 	GL_CreateColorBuffer ();
+	GL_CreateRaytraceAccumulationImage ();
 	GL_CreateDepthBuffer ();
 	GL_CreateRenderPasses ();
 	GL_CreateFrameBuffers ();
@@ -2305,6 +2416,8 @@ static void GL_DestroyRenderResources (void)
 
 	R_FreeDescriptorSet (vulkan_globals.screen_effects_desc_set, &vulkan_globals.screen_effects_set_layout);
 	vulkan_globals.screen_effects_desc_set = VK_NULL_HANDLE;
+
+	GL_DestroyRaytraceAccumulationImage ();
 
 	if (msaa_color_buffer)
 	{
@@ -2654,13 +2767,17 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 	{
 		R_BeginDebugUtilsLabel (cbx, "Screen Effects");
 
-		VkImageMemoryBarrier image_barriers[2];
-		image_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		image_barriers[0].pNext = NULL;
-		image_barriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		image_barriers[0].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		image_barriers[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		image_barriers[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                qboolean raytrace_camera_changed = false;
+                if (parms->raytrace && vulkan_globals.ray_query && bmodel_tlas)
+                        raytrace_camera_changed = RaytraceCameraChanged (parms);
+
+                VkImageMemoryBarrier image_barriers[2];
+                image_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                image_barriers[0].pNext = NULL;
+                image_barriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                image_barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                image_barriers[0].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                image_barriers[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
 		image_barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		image_barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		image_barriers[0].image = vulkan_globals.color_buffers[0];
@@ -2685,10 +2802,67 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 		image_barriers[1].subresourceRange.baseArrayLayer = 0;
 		image_barriers[1].subresourceRange.layerCount = 1;
 
-		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 2, image_barriers);
+                vkCmdPipelineBarrier (
+                        cbx->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                        NULL, 0, NULL, 2, image_barriers);
 
-		GL_SetCanvas (cbx, CANVAS_NONE); // Invalidate canvas so push constants get set later
+                if (parms->raytrace && (raytrace_accum_image != VK_NULL_HANDLE))
+                {
+                        VkPipelineStageFlags accum_src_stage =
+                                raytrace_accum_image_initialized ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                        VkAccessFlags accum_src_access =
+                                raytrace_accum_image_initialized ? VK_ACCESS_SHADER_WRITE_BIT : 0;
+                        VkPipelineStageFlags accum_dst_stage =
+                                (raytrace_frame_index == 0) ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                        VkAccessFlags accum_dst_access =
+                                (raytrace_frame_index == 0) ? VK_ACCESS_TRANSFER_WRITE_BIT : (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+                        VkImageMemoryBarrier accum_barrier;
+                        ZEROED_STRUCT (VkImageMemoryBarrier, accum_barrier);
+                        accum_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        accum_barrier.srcAccessMask = accum_src_access;
+                        accum_barrier.dstAccessMask = accum_dst_access;
+                        accum_barrier.oldLayout =
+                                raytrace_accum_image_initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
+                        accum_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                        accum_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        accum_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        accum_barrier.image = raytrace_accum_image;
+                        accum_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        accum_barrier.subresourceRange.baseMipLevel = 0;
+                        accum_barrier.subresourceRange.levelCount = 1;
+                        accum_barrier.subresourceRange.baseArrayLayer = 0;
+                        accum_barrier.subresourceRange.layerCount = 1;
+
+                        vkCmdPipelineBarrier (
+                                cbx->cb, accum_src_stage, accum_dst_stage, 0, 0, NULL, 0, NULL, 1, &accum_barrier);
+
+                        if (raytrace_frame_index == 0)
+                        {
+                                VkClearColorValue clear_value;
+                                clear_value.float32[0] = 0.0f;
+                                clear_value.float32[1] = 0.0f;
+                                clear_value.float32[2] = 0.0f;
+                                clear_value.float32[3] = 0.0f;
+
+                                VkImageSubresourceRange range = accum_barrier.subresourceRange;
+                                vkCmdClearColorImage (
+                                        cbx->cb, raytrace_accum_image, VK_IMAGE_LAYOUT_GENERAL, &clear_value, 1, &range);
+
+                                accum_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                                accum_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                                accum_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                                accum_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+                                vkCmdPipelineBarrier (
+                                        cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL,
+                                        0, NULL, 1, &accum_barrier);
+                        }
+
+                        raytrace_accum_image_initialized = true;
+                }
+
+                GL_SetCanvas (cbx, CANVAS_NONE); // Invalidate canvas so push constants get set later
 
                 vulkan_pipeline_t *pipeline = NULL;
                 if (parms->raytrace && (vulkan_globals.raytrace_pipeline.handle != VK_NULL_HANDLE))
@@ -2712,7 +2886,7 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 
                 if (parms->raytrace && vulkan_globals.ray_query && bmodel_tlas)
                 {
-                        if (RaytraceCameraChanged (parms))
+                        if (raytrace_camera_changed)
                                 raytrace_frame_index = 0;
 
                         gl_raytrace_constants_t push_constants;
@@ -3101,7 +3275,8 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
 		.vid_palettize = vid_palettize.value != 0,
 		.menu = key_dest == key_menu,
                 .raytrace = r_raytrace.value && (bmodel_tlas != VK_NULL_HANDLE) &&
-                             (vulkan_globals.raytrace_pipeline.handle != VK_NULL_HANDLE),
+                             (vulkan_globals.raytrace_pipeline.handle != VK_NULL_HANDLE) &&
+                             (raytrace_accum_image_view != VK_NULL_HANDLE),
 		.render_scale = CLAMP (0, render_scale, 8),
 		.vid_width = vid.width,
 		.vid_height = vid.height,

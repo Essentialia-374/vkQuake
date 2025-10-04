@@ -5,7 +5,7 @@
 #extension GL_EXT_ray_tracing_position_fetch : require
 
 // ---------------------- Descriptor set 0 ----------------------
-layout (set = 0, binding = 0, rgba16f) uniform writeonly image2D output_image;
+layout (set = 0, binding = 0, rgba8) uniform image2D output_image;
 layout (set = 0, binding = 1) uniform accelerationStructureEXT tlas;
 layout (set = 0, binding = 2, rgba32f) uniform coherent image2D accum_image;
 // Optional HDR environment (equirectangular, linear HDR)
@@ -140,6 +140,13 @@ vec3 base_color_from_primitive(uint primitive_index) {
     return palette[primitive_index % 5u];
 }
 
+vec3 srgb_to_linear(vec3 c)
+{
+    vec3 low  = c / 12.92;
+    vec3 high = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(low, high, step(vec3(0.04045), c));
+}
+
 // Environment lookup (equirectangular; X right, Y up, Z forward)
 vec3 environment(vec3 dir) {
     // If no env bound, return faint bluish sky
@@ -200,6 +207,8 @@ void main()
     const uvec2 pix = gl_GlobalInvocationID.xy;
     const vec2  pxf = vec2(pix);
 
+    vec3 primary_albedo = srgb_to_linear(imageLoad(output_image, ivec2(pix)).rgb);
+
     // RNG seed: pixel, frame
     uint seed = pcg_hash(pix ^ uvec2(pc.frame_index, pc.frame_index*16699u));
 
@@ -247,7 +256,7 @@ void main()
 
         // --- Fetch / synthesize material ---
         // (Replace with SSBO lookups if you wire materials in binding=4)
-        vec3  baseColor = base_color_from_primitive(prim);
+        vec3 baseColor = (bounce == 0) ? primary_albedo : base_color_from_primitive(prim);
         float roughness = clamp(0.15 + 0.7 * fract(float(prim) * 0.61803), 0.05, 0.95);
         float metallic  = step(0.65, fract(float(prim) * 0.38197));
         float emission  = 0.0; // set >0 to make emissive primitives
