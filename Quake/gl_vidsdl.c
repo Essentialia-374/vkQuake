@@ -33,6 +33,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "SDL_syswm.h"
 #include "SDL_vulkan.h"
 #include "menu.h"
+#include "gl_trace_ray.h"
 #ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
 #endif
@@ -1917,40 +1918,10 @@ void GL_UpdateDescriptorSets (void)
 	vkUpdateDescriptorSets (vulkan_globals.device, countof (screen_effects_writes), screen_effects_writes, 0, NULL);
 
 #if defined(_DEBUG)
-	if (vulkan_globals.ray_query && bmodel_tlas)
-	{
-		if (vulkan_globals.ray_debug_desc_set != VK_NULL_HANDLE)
-			R_FreeDescriptorSet (vulkan_globals.ray_debug_desc_set, &vulkan_globals.ray_debug_set_layout);
-		vulkan_globals.ray_debug_desc_set = R_AllocateDescriptorSet (&vulkan_globals.ray_debug_set_layout);
-
-		int num_ray_debug_writes = 0;
-		ZEROED_STRUCT_ARRAY (VkWriteDescriptorSet, ray_debug_writes, 2);
-
-		ray_debug_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		ray_debug_writes[0].dstBinding = num_ray_debug_writes++;
-		ray_debug_writes[0].dstArrayElement = 0;
-		ray_debug_writes[0].descriptorCount = 1;
-		ray_debug_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		ray_debug_writes[0].dstSet = vulkan_globals.ray_debug_desc_set;
-		ray_debug_writes[0].pImageInfo = &output_image_info;
-
-		if (bmodel_tlas != VK_NULL_HANDLE)
-		{
-			ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, acceleration_structure_write);
-			acceleration_structure_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-			acceleration_structure_write.accelerationStructureCount = 1;
-			acceleration_structure_write.pAccelerationStructures = &bmodel_tlas;
-			ray_debug_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			ray_debug_writes[1].pNext = &acceleration_structure_write;
-			ray_debug_writes[1].dstBinding = num_ray_debug_writes++;
-			ray_debug_writes[1].dstArrayElement = 0;
-			ray_debug_writes[1].descriptorCount = 1;
-			ray_debug_writes[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-			ray_debug_writes[1].dstSet = vulkan_globals.ray_debug_desc_set;
-		}
-
-		vkUpdateDescriptorSets (vulkan_globals.device, num_ray_debug_writes, ray_debug_writes, 0, NULL);
-	}
+        if (vulkan_globals.ray_query && bmodel_tlas)
+        {
+                GL_TraceRay_UpdateDescriptorSet (&output_image_info, bmodel_tlas);
+        }
 #endif
 }
 
@@ -2601,25 +2572,6 @@ typedef struct screen_effect_constants_s
 	float	 poly_blend_a;
 } screen_effect_constants_t;
 
-typedef struct ray_debug_constants_s
-{
-	float screen_size_rcp_x;
-	float screen_size_rcp_y;
-	float aspect_ratio;
-	float origin_x;
-	float origin_y;
-	float origin_z;
-	float forward_x;
-	float forward_y;
-	float forward_z;
-	float right_x;
-	float right_y;
-	float right_z;
-	float down_x;
-	float down_y;
-	float down_z;
-} ray_debug_constants_t;
-
 typedef struct end_rendering_parms_s
 {
 	uint32_t vid_width	   : 20;
@@ -2712,70 +2664,67 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 		else
 			pipeline = &vulkan_globals.screen_effects_pipeline;
 
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+                R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 
 #if defined(_DEBUG)
-		if (!parms->ray_debug || !bmodel_tlas)
+                if (parms->ray_debug && bmodel_tlas)
+                {
+                        const gl_trace_ray_constants_t push_constants = {
+                                1.0f / (float)parms->vid_width,
+                                1.0f / (float)parms->vid_height,
+                                (float)parms->vid_width / (float)parms->vid_height,
+                                parms->origin[0],
+                                parms->origin[1],
+                                parms->origin[2],
+                                parms->forward[0],
+                                parms->forward[1],
+                                parms->forward[2],
+                                parms->right[0],
+                                parms->right[1],
+                                parms->right[2],
+                                parms->down[0],
+                                parms->down[1],
+                                parms->down[2],
+                        };
+                        GL_TraceRay_Render (cbx, parms->vid_width, parms->vid_height, &push_constants);
+                }
+                else
 #endif
-		{
-			vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &vulkan_globals.screen_effects_desc_set, 0, NULL);
+                {
+                        vkCmdBindDescriptorSets (
+                                cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1,
+                                &vulkan_globals.screen_effects_desc_set, 0, NULL);
 
-			uint32_t screen_effect_flags = 0;
-			if (parms->render_warp)
-				screen_effect_flags |= SCREEN_EFFECT_FLAG_WATER_WARP;
-			if (parms->render_scale >= 8)
-				screen_effect_flags |= SCREEN_EFFECT_FLAG_SCALE_8X;
-			else if (parms->render_scale >= 4)
-				screen_effect_flags |= SCREEN_EFFECT_FLAG_SCALE_4X;
-			else if (parms->render_scale >= 2)
-				screen_effect_flags |= SCREEN_EFFECT_FLAG_SCALE_2X;
-			if (parms->vid_palettize)
-				screen_effect_flags |= SCREEN_EFFECT_FLAG_PALETTIZE;
-			if (parms->menu)
-				screen_effect_flags |= SCREEN_EFFECT_FLAG_MENU;
+                        uint32_t screen_effect_flags = 0;
+                        if (parms->render_warp)
+                                screen_effect_flags |= SCREEN_EFFECT_FLAG_WATER_WARP;
+                        if (parms->render_scale >= 8)
+                                screen_effect_flags |= SCREEN_EFFECT_FLAG_SCALE_8X;
+                        else if (parms->render_scale >= 4)
+                                screen_effect_flags |= SCREEN_EFFECT_FLAG_SCALE_4X;
+                        else if (parms->render_scale >= 2)
+                                screen_effect_flags |= SCREEN_EFFECT_FLAG_SCALE_2X;
+                        if (parms->vid_palettize)
+                                screen_effect_flags |= SCREEN_EFFECT_FLAG_PALETTIZE;
+                        if (parms->menu)
+                                screen_effect_flags |= SCREEN_EFFECT_FLAG_MENU;
 
-			const screen_effect_constants_t push_constants = {
-				parms->vid_width - 1,
-				parms->vid_height - 1,
-				1.0f / (float)parms->vid_width,
-				1.0f / (float)parms->vid_height,
-				(float)parms->vid_width / (float)parms->vid_height,
-				parms->time,
-				screen_effect_flags,
-				(float)parms->v_blend[0] / 255.0f,
-				(float)parms->v_blend[1] / 255.0f,
-				(float)parms->v_blend[2] / 255.0f,
-				(float)parms->v_blend[3] / 255.0f,
-			};
-			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
-		}
-#if defined(_DEBUG)
-		else
-		{
-			vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &vulkan_globals.ray_debug_desc_set, 0, NULL);
-
-			const ray_debug_constants_t push_constants = {
-				1.0f / (float)parms->vid_width,
-				1.0f / (float)parms->vid_height,
-				(float)parms->vid_width / (float)parms->vid_height,
-				parms->origin[0],
-				parms->origin[1],
-				parms->origin[2],
-				parms->forward[0],
-				parms->forward[1],
-				parms->forward[2],
-				parms->right[0],
-				parms->right[1],
-				parms->right[2],
-				parms->down[0],
-				parms->down[1],
-				parms->down[2],
-			};
-			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
-		}
-#endif
-
-		vkCmdDispatch (cbx->cb, (parms->vid_width + 7) / 8, (parms->vid_height + 7) / 8, 1);
+                        const screen_effect_constants_t push_constants = {
+                                parms->vid_width - 1,
+                                parms->vid_height - 1,
+                                1.0f / (float)parms->vid_width,
+                                1.0f / (float)parms->vid_height,
+                                (float)parms->vid_width / (float)parms->vid_height,
+                                parms->time,
+                                screen_effect_flags,
+                                (float)parms->v_blend[0] / 255.0f,
+                                (float)parms->v_blend[1] / 255.0f,
+                                (float)parms->v_blend[2] / 255.0f,
+                                (float)parms->v_blend[3] / 255.0f,
+                        };
+                        R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
+                        vkCmdDispatch (cbx->cb, (parms->vid_width + 7) / 8, (parms->vid_height + 7) / 8, 1);
+                }
 
 		image_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_barriers[0].pNext = NULL;

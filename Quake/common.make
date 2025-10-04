@@ -178,6 +178,7 @@ GLOBJS = \
 	r_part_fte.o \
 	r_world.o \
 	gl_screen.o \
+	gl_trace_ray.o \
 	gl_sky.o \
 	gl_warp.o \
 	$(SYSOBJ_GL_VID) \
