@@ -196,6 +196,7 @@ int			screenshot_quality;
 task_handle_t prev_end_rendering_task = INVALID_TASK_HANDLE;
 
 static uint32_t raytrace_frame_index = 0;
+static uint32_t raytrace_rng_seed = 0;
 static qboolean raytrace_prev_valid = false;
 static vec3_t raytrace_prev_origin;
 static uint32_t raytrace_prev_tlas_revision = 0;
@@ -1974,21 +1975,21 @@ void GL_UpdateDescriptorSets (void)
 	output_image_info.imageView = color_buffers_view[0];
 	output_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-	VkDescriptorImageInfo accum_image_info;
-	VkDescriptorImageInfo *accum_image_ptr = NULL;
-	if (raytrace_accum_image_view != VK_NULL_HANDLE)
-	{
-		ZEROED_STRUCT (VkDescriptorImageInfo, accum_image_info);
-		accum_image_info.imageView = raytrace_accum_image_view;
-		accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-		accum_image_ptr = &accum_image_info;
-	}
+        VkDescriptorImageInfo accum_image_info;
+        VkDescriptorImageInfo *accum_image_ptr = NULL;
+        if (raytrace_accum_image_view != VK_NULL_HANDLE)
+        {
+                memset (&accum_image_info, 0, sizeof (accum_image_info));
+                accum_image_info.imageView = raytrace_accum_image_view;
+                accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                accum_image_ptr = &accum_image_info;
+        }
 
-	VkDescriptorImageInfo env_image_info;
-	VkDescriptorImageInfo *env_image_ptr = NULL;
+        VkDescriptorImageInfo env_image_info;
+        VkDescriptorImageInfo *env_image_ptr = NULL;
         if (whitetexture && (whitetexture->image_view != VK_NULL_HANDLE))
         {
-                ZEROED_STRUCT (VkDescriptorImageInfo, env_image_info);
+                memset (&env_image_info, 0, sizeof (env_image_info));
                 env_image_info.imageView = whitetexture->image_view;
                 env_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 env_image_info.sampler = vulkan_globals.linear_sampler;
@@ -2829,7 +2830,7 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
                                 (raytrace_frame_index == 0) ? VK_ACCESS_TRANSFER_WRITE_BIT : (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
                         VkImageMemoryBarrier accum_barrier;
-                        ZEROED_STRUCT (VkImageMemoryBarrier, accum_barrier);
+                        memset (&accum_barrier, 0, sizeof (accum_barrier));
                         accum_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                         accum_barrier.srcAccessMask = accum_src_access;
                         accum_barrier.dstAccessMask = accum_dst_access;
@@ -2900,6 +2901,8 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
                         if (raytrace_scene_changed)
                                 raytrace_frame_index = 0;
 
+                        const uint32_t rng_seed = ++raytrace_rng_seed;
+
                         gl_raytrace_constants_t push_constants;
                         memset (&push_constants, 0, sizeof (push_constants));
                         push_constants.screen_size_rcp_x = 1.0f / (float)parms->vid_width;
@@ -2921,6 +2924,7 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
                         push_constants.focus_distance = 1000.0f;
                         push_constants.exposure = 1.0f;
                         push_constants.frame_index = ++raytrace_frame_index;
+                        push_constants.rng_seed = rng_seed;
 
                         GL_Raytrace_Render (cbx, parms->vid_width, parms->vid_height, &push_constants);
 
@@ -2934,6 +2938,7 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
                 {
                         raytrace_prev_valid = false;
                         raytrace_frame_index = 0;
+                        raytrace_rng_seed = 0;
 
                         vkCmdBindDescriptorSets (
                                 cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1,
