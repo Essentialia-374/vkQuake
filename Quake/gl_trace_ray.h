@@ -22,24 +22,7 @@ typedef struct gl_trace_ray_constants_s
         float down_z;
 } gl_trace_ray_constants_t;
 
-#if defined(_DEBUG)
 void GL_TraceRay_UpdateDescriptorSet (const VkDescriptorImageInfo *output_image_info, VkAccelerationStructureKHR tlas);
 void GL_TraceRay_Render (cb_context_t *cbx, int width, int height, const gl_trace_ray_constants_t *constants);
-#else
-static inline void GL_TraceRay_UpdateDescriptorSet (
-        const VkDescriptorImageInfo *output_image_info, VkAccelerationStructureKHR tlas)
-{
-        (void)output_image_info;
-        (void)tlas;
-}
-
-static inline void GL_TraceRay_Render (cb_context_t *cbx, int width, int height, const gl_trace_ray_constants_t *constants)
-{
-        (void)cbx;
-        (void)width;
-        (void)height;
-        (void)constants;
-}
-#endif /* _DEBUG */
 
 #endif /* GL_TRACE_RAY_H */

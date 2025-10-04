@@ -106,9 +106,7 @@ cvar_t		  vid_fsaamode = {"vid_fsaamode", "0", CVAR_ARCHIVE};
 cvar_t		  vid_gamma = {"gamma", "0.9", CVAR_ARCHIVE};		// johnfitz -- moved here from view.c
 cvar_t		  vid_contrast = {"contrast", "1.4", CVAR_ARCHIVE}; // QuakeSpasm, MarkV
 cvar_t		  r_usesops = {"r_usesops", "1", CVAR_ARCHIVE};		// johnfitz
-#if defined(_DEBUG)
 static cvar_t r_raydebug = {"r_raydebug", "0", 0};
-#endif
 
 static VkInstance				vulkan_instance;
 static VkPhysicalDevice			vulkan_physical_device;
@@ -1917,12 +1915,10 @@ void GL_UpdateDescriptorSets (void)
 
 	vkUpdateDescriptorSets (vulkan_globals.device, countof (screen_effects_writes), screen_effects_writes, 0, NULL);
 
-#if defined(_DEBUG)
         if (vulkan_globals.ray_query && bmodel_tlas)
         {
                 GL_TraceRay_UpdateDescriptorSet (&output_image_info, bmodel_tlas);
         }
-#endif
 }
 
 /*
@@ -2646,28 +2642,27 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 
 		GL_SetCanvas (cbx, CANVAS_NONE); // Invalidate canvas so push constants get set later
 
-		vulkan_pipeline_t *pipeline = NULL;
-#if defined(_DEBUG)
-		if (parms->ray_debug)
-		{
-			pipeline = &vulkan_globals.ray_debug_pipeline;
-		}
-		else
-#endif
-			if (parms->render_scale >= 2)
-		{
-			if (vulkan_globals.screen_effects_sops && r_usesops.value)
-				pipeline = &vulkan_globals.screen_effects_scale_sops_pipeline;
-			else
-				pipeline = &vulkan_globals.screen_effects_scale_pipeline;
-		}
-		else
-			pipeline = &vulkan_globals.screen_effects_pipeline;
+                vulkan_pipeline_t *pipeline = NULL;
+                if (parms->ray_debug && (vulkan_globals.ray_debug_pipeline.handle != VK_NULL_HANDLE))
+                {
+                        pipeline = &vulkan_globals.ray_debug_pipeline;
+                }
+                else if (parms->render_scale >= 2)
+                {
+                        if (vulkan_globals.screen_effects_sops && r_usesops.value)
+                                pipeline = &vulkan_globals.screen_effects_scale_sops_pipeline;
+                        else
+                                pipeline = &vulkan_globals.screen_effects_scale_pipeline;
+                }
+                else
+                        pipeline = &vulkan_globals.screen_effects_pipeline;
+
+                if (!pipeline)
+                        pipeline = &vulkan_globals.screen_effects_pipeline;
 
                 R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 
-#if defined(_DEBUG)
-                if (parms->ray_debug && bmodel_tlas)
+                if (parms->ray_debug && vulkan_globals.ray_query && bmodel_tlas)
                 {
                         const gl_trace_ray_constants_t push_constants = {
                                 1.0f / (float)parms->vid_width,
@@ -2689,7 +2684,6 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
                         GL_TraceRay_Render (cbx, parms->vid_width, parms->vid_height, &push_constants);
                 }
                 else
-#endif
                 {
                         vkCmdBindDescriptorSets (
                                 cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1,
@@ -3041,9 +3035,8 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
 		.render_warp = render_warp,
 		.vid_palettize = vid_palettize.value != 0,
 		.menu = key_dest == key_menu,
-#if defined(_DEBUG)
-		.ray_debug = r_raydebug.value && (bmodel_tlas != VK_NULL_HANDLE),
-#endif
+                .ray_debug = r_raydebug.value && (bmodel_tlas != VK_NULL_HANDLE) &&
+                             (vulkan_globals.ray_debug_pipeline.handle != VK_NULL_HANDLE),
 		.render_scale = CLAMP (0, render_scale, 8),
 		.vid_width = vid.width,
 		.vid_height = vid.height,
@@ -3307,9 +3300,7 @@ void VID_Init (void)
 	Cvar_RegisterVariable (&vid_desktopfullscreen); // QuakeSpasm
 	Cvar_RegisterVariable (&vid_borderless);		// QuakeSpasm
 	Cvar_RegisterVariable (&vid_palettize);
-#if defined(_DEBUG)
-	Cvar_RegisterVariable (&r_raydebug);
-#endif
+        Cvar_RegisterVariable (&r_raydebug);
 	Cvar_SetCallback (&vid_fullscreen, VID_Changed_f);
 	Cvar_SetCallback (&vid_width, VID_Changed_f);
 	Cvar_SetCallback (&vid_height, VID_Changed_f);
