@@ -543,6 +543,7 @@ void R_NewGame (void);
 
 void R_AnimateLight (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
+uint32_t R_BModelTLASRevision (void);
 void R_UpdateLightmapsAndIndirect (void *unused);
 void R_MarkSurfaces (qboolean use_tasks, task_handle_t before_mark, task_handle_t *store_efrags, task_handle_t *cull_surfaces, task_handle_t *chain_surfaces);
 qboolean R_CullBox (vec3_t emins, vec3_t emaxs);

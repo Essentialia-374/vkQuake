@@ -198,6 +198,7 @@ task_handle_t prev_end_rendering_task = INVALID_TASK_HANDLE;
 static uint32_t raytrace_frame_index = 0;
 static qboolean raytrace_prev_valid = false;
 static vec3_t raytrace_prev_origin;
+static uint32_t raytrace_prev_tlas_revision = 0;
 static vec3_t raytrace_prev_forward;
 static vec3_t raytrace_prev_right;
 static vec3_t raytrace_prev_down;
@@ -2768,8 +2769,18 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 		R_BeginDebugUtilsLabel (cbx, "Screen Effects");
 
                 qboolean raytrace_camera_changed = false;
+                qboolean raytrace_scene_changed = false;
                 if (parms->raytrace && vulkan_globals.ray_query && bmodel_tlas)
+                {
                         raytrace_camera_changed = RaytraceCameraChanged (parms);
+                        raytrace_scene_changed = raytrace_camera_changed;
+                        const uint32_t current_tlas_revision = R_BModelTLASRevision ();
+                        if (current_tlas_revision != raytrace_prev_tlas_revision)
+                        {
+                                raytrace_prev_tlas_revision = current_tlas_revision;
+                                raytrace_scene_changed = true;
+                        }
+                }
 
                 VkImageMemoryBarrier image_barriers[2];
                 image_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2886,7 +2897,7 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 
                 if (parms->raytrace && vulkan_globals.ray_query && bmodel_tlas)
                 {
-                        if (raytrace_camera_changed)
+                        if (raytrace_scene_changed)
                                 raytrace_frame_index = 0;
 
                         gl_raytrace_constants_t push_constants;
