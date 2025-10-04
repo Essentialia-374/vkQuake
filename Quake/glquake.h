@@ -312,7 +312,7 @@ typedef struct
 	vulkan_pipeline_t		 update_lightmap_rt_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
-	vulkan_pipeline_t		 ray_debug_pipeline;
+	vulkan_pipeline_t		 raytrace_pipeline;
 #ifdef PSET_SCRIPT
 	vulkan_pipeline_t fte_particle_pipelines[FTE_PARTICLE_PIPELINE_COUNT];
 #endif
@@ -329,8 +329,8 @@ typedef struct
 	VkDescriptorSet			 indirect_compute_desc_set;
 	vulkan_desc_set_layout_t indirect_compute_set_layout;
 	vulkan_desc_set_layout_t lightmap_compute_rt_set_layout;
-	VkDescriptorSet			 ray_debug_desc_set;
-	vulkan_desc_set_layout_t ray_debug_set_layout;
+	VkDescriptorSet			 raytrace_desc_set;
+	vulkan_desc_set_layout_t raytrace_set_layout;
 	vulkan_desc_set_layout_t joints_buffer_set_layout;
 
 	// Samplers

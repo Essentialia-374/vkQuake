@@ -43,7 +43,7 @@ shaders = [
     'Shaders/update_lightmap_8bit_rt.comp',
     'Shaders/world.frag',
     'Shaders/world.vert',
-    'Shaders/ray_debug.comp',
+    'Shaders/raytrace.comp',
 ]
 
 glslang = find_program('glslangValidator')
@@ -99,7 +99,7 @@ srcs = [
     'Quake/gl_rmain.c',
     'Quake/gl_rmisc.c',
     'Quake/gl_screen.c',
-    'Quake/gl_trace_ray.c',
+    'Quake/gl_raytrace.c',
     'Quake/gl_sky.c',
     'Quake/gl_texmgr.c',
     'Quake/gl_vidsdl.c',

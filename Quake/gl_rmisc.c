@@ -1457,28 +1457,28 @@ void R_CreateDescriptorSetLayouts ()
 
         if (vulkan_globals.ray_query)
         {
-                ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, ray_debug_layout_bindings, 2);
-                ray_debug_layout_bindings[0].binding = 0;
-                ray_debug_layout_bindings[0].descriptorCount = 1;
-                ray_debug_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-                ray_debug_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-                ray_debug_layout_bindings[1].binding = 1;
-                ray_debug_layout_bindings[1].descriptorCount = 1;
-                ray_debug_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-                ray_debug_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, raytrace_layout_bindings, 2);
+                raytrace_layout_bindings[0].binding = 0;
+                raytrace_layout_bindings[0].descriptorCount = 1;
+                raytrace_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                raytrace_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                raytrace_layout_bindings[1].binding = 1;
+                raytrace_layout_bindings[1].descriptorCount = 1;
+                raytrace_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+                raytrace_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-                descriptor_set_layout_create_info.bindingCount = countof (ray_debug_layout_bindings);
-                descriptor_set_layout_create_info.pBindings = ray_debug_layout_bindings;
+                descriptor_set_layout_create_info.bindingCount = countof (raytrace_layout_bindings);
+                descriptor_set_layout_create_info.pBindings = raytrace_layout_bindings;
 
-                memset (&vulkan_globals.ray_debug_set_layout, 0, sizeof (vulkan_globals.ray_debug_set_layout));
-                vulkan_globals.ray_debug_set_layout.num_storage_images = 1;
+                memset (&vulkan_globals.raytrace_set_layout, 0, sizeof (vulkan_globals.raytrace_set_layout));
+                vulkan_globals.raytrace_set_layout.num_storage_images = 1;
 
                 err = vkCreateDescriptorSetLayout (
-                        vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.ray_debug_set_layout.handle);
+                        vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.raytrace_set_layout.handle);
                 if (err != VK_SUCCESS)
                         Sys_Error ("vkCreateDescriptorSetLayout failed");
                 GL_SetObjectName (
-                        (uint64_t)vulkan_globals.ray_debug_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "ray debug");
+                        (uint64_t)vulkan_globals.raytrace_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "raytrace");
         }
 }
 
@@ -1847,9 +1847,9 @@ void R_CreatePipelineLayouts ()
 
         if (vulkan_globals.ray_query)
         {
-                // Ray debug
-                VkDescriptorSetLayout ray_debug_descriptor_set_layouts[1] = {
-                        vulkan_globals.ray_debug_set_layout.handle,
+                // Ray trace
+                VkDescriptorSetLayout raytrace_descriptor_set_layouts[1] = {
+                        vulkan_globals.raytrace_set_layout.handle,
                 };
 
                 ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
@@ -1860,17 +1860,17 @@ void R_CreatePipelineLayouts ()
                 ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
                 pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
                 pipeline_layout_create_info.setLayoutCount = 1;
-                pipeline_layout_create_info.pSetLayouts = ray_debug_descriptor_set_layouts;
+                pipeline_layout_create_info.pSetLayouts = raytrace_descriptor_set_layouts;
                 pipeline_layout_create_info.pushConstantRangeCount = 1;
                 pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
 
                 err = vkCreatePipelineLayout (
-                        vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.ray_debug_pipeline.layout.handle);
+                        vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.raytrace_pipeline.layout.handle);
                 if (err != VK_SUCCESS)
                         Sys_Error ("vkCreatePipelineLayout failed");
                 GL_SetObjectName (
-                        (uint64_t)vulkan_globals.ray_debug_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "ray_debug_pipeline_layout");
-                vulkan_globals.ray_debug_pipeline.layout.push_constant_range = push_constant_range;
+                        (uint64_t)vulkan_globals.raytrace_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "raytrace_pipeline_layout");
+                vulkan_globals.raytrace_pipeline.layout.push_constant_range = push_constant_range;
         }
 }
 
@@ -2132,7 +2132,7 @@ DECLARE_SHADER_MODULE (update_lightmap_8bit_comp);
 DECLARE_SHADER_MODULE (update_lightmap_8bit_rt_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
-DECLARE_SHADER_MODULE (ray_debug_comp);
+DECLARE_SHADER_MODULE (raytrace_comp);
 
 /*
 ===============
@@ -2478,10 +2478,10 @@ static void R_CreateParticlesPipelines ()
 
 /*
 ===============
-R_CreateRayDebugPipelines
+R_CreateRaytracePipelines
 ===============
 */
-static void R_CreateRayDebugPipelines ()
+static void R_CreateRaytracePipelines ()
 {
 	if (!vulkan_globals.ray_query)
 		return;
@@ -2493,19 +2493,19 @@ static void R_CreateRayDebugPipelines ()
 	ZEROED_STRUCT (VkPipelineShaderStageCreateInfo, compute_shader_stage);
 	compute_shader_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	compute_shader_stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	compute_shader_stage.module = ray_debug_comp_module;
+	compute_shader_stage.module = raytrace_comp_module;
 	compute_shader_stage.pName = "main";
 
 	memset (&infos.compute_pipeline, 0, sizeof (infos.compute_pipeline));
 	infos.compute_pipeline.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 	infos.compute_pipeline.stage = compute_shader_stage;
-	infos.compute_pipeline.layout = vulkan_globals.ray_debug_pipeline.layout.handle;
+	infos.compute_pipeline.layout = vulkan_globals.raytrace_pipeline.layout.handle;
 
-	assert (vulkan_globals.ray_debug_pipeline.handle == VK_NULL_HANDLE);
-	err = vkCreateComputePipelines (vulkan_globals.device, VK_NULL_HANDLE, 1, &infos.compute_pipeline, NULL, &vulkan_globals.ray_debug_pipeline.handle);
+	assert (vulkan_globals.raytrace_pipeline.handle == VK_NULL_HANDLE);
+	err = vkCreateComputePipelines (vulkan_globals.device, VK_NULL_HANDLE, 1, &infos.compute_pipeline, NULL, &vulkan_globals.raytrace_pipeline.handle);
 	if (err != VK_SUCCESS)
-		Sys_Error ("vkCreateComputePipelines failed (ray_debug_pipeline)");
-        GL_SetObjectName ((uint64_t)vulkan_globals.ray_debug_pipeline.handle, VK_OBJECT_TYPE_PIPELINE, "ray_debug_pipeline");
+		Sys_Error ("vkCreateComputePipelines failed (raytrace_pipeline)");
+        GL_SetObjectName ((uint64_t)vulkan_globals.raytrace_pipeline.handle, VK_OBJECT_TYPE_PIPELINE, "raytrace_pipeline");
 }
 
 /*
@@ -3365,7 +3365,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (update_lightmap_10bit_comp);
 	CREATE_SHADER_MODULE_COND (update_lightmap_8bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
-        CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
+        CREATE_SHADER_MODULE_COND (raytrace_comp, vulkan_globals.ray_query);
 }
 
 /*
@@ -3407,7 +3407,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (update_lightmap_8bit_rt_comp);
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_comp);
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_rt_comp);
-	DESTROY_SHADER_MODULE (ray_debug_comp);
+	DESTROY_SHADER_MODULE (raytrace_comp);
 }
 
 /*
@@ -3436,7 +3436,7 @@ void R_CreatePipelines ()
 	R_CreateScreenEffectsPipelines ();
 	R_CreateUpdateLightmapPipelines ();
 	R_CreateIndirectComputePipelines ();
-	R_CreateRayDebugPipelines ();
+	R_CreateRaytracePipelines ();
 
 	R_DestroyShaderModules ();
 }
@@ -3541,10 +3541,10 @@ void R_DestroyPipelines (void)
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.update_lightmap_rt_pipeline.handle, NULL);
 		vulkan_globals.update_lightmap_rt_pipeline.handle = VK_NULL_HANDLE;
 	}
-	if (vulkan_globals.ray_debug_pipeline.handle != VK_NULL_HANDLE)
+	if (vulkan_globals.raytrace_pipeline.handle != VK_NULL_HANDLE)
 	{
-		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.ray_debug_pipeline.handle, NULL);
-		vulkan_globals.ray_debug_pipeline.handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.raytrace_pipeline.handle, NULL);
+		vulkan_globals.raytrace_pipeline.handle = VK_NULL_HANDLE;
 	}
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.indirect_draw_pipeline.handle, NULL);
 	vulkan_globals.indirect_draw_pipeline.handle = VK_NULL_HANDLE;

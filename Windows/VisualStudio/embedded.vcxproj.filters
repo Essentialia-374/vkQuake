@@ -88,7 +88,7 @@
     <CustomBuild Include="..\..\Shaders\update_lightmap_rt.comp">
       <Filter>Shaders</Filter>
     </CustomBuild>
-    <CustomBuild Include="..\..\Shaders\ray_debug.comp">
+    <CustomBuild Include="..\..\Shaders\raytrace.comp">
       <Filter>Shaders</Filter>
     </CustomBuild>
     <CustomBuild Include="..\..\Quake\vkquake.pak" />
