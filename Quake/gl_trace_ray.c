@@ -1,5 +1,5 @@
 #include "quakedef.h"
-#include "gl_trace_ray.h"
+#include "gl_traceray.h"
 
 #if defined(_DEBUG)
 
@@ -24,7 +24,6 @@ void GL_TraceRay_UpdateDescriptorSet (const VkDescriptorImageInfo *output_image_
         writes[num_writes].pImageInfo = output_image_info;
         num_writes += 1;
 
-        VkWriteDescriptorSetAccelerationStructureKHR acceleration_structure_write;
         ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, acceleration_structure_write);
 
         if (tlas != VK_NULL_HANDLE)
