@@ -88,6 +88,7 @@ srcs = [
     'Quake/console.c',
     'Quake/crc.c',
     'Quake/cvar.c',
+    'Quake/gl_batch_renderer.c',
     'Quake/gl_draw.c',
     'Quake/gl_fog.c',
     'Quake/gl_heap.c',
