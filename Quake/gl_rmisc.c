@@ -1457,7 +1457,7 @@ void R_CreateDescriptorSetLayouts ()
 
         if (vulkan_globals.ray_query)
         {
-                ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, raytrace_layout_bindings, 2);
+                ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, raytrace_layout_bindings, 6);
                 raytrace_layout_bindings[0].binding = 0;
                 raytrace_layout_bindings[0].descriptorCount = 1;
                 raytrace_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1466,12 +1466,31 @@ void R_CreateDescriptorSetLayouts ()
                 raytrace_layout_bindings[1].descriptorCount = 1;
                 raytrace_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
                 raytrace_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                raytrace_layout_bindings[2].binding = 2;
+                raytrace_layout_bindings[2].descriptorCount = 1;
+                raytrace_layout_bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                raytrace_layout_bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                raytrace_layout_bindings[3].binding = 3;
+                raytrace_layout_bindings[3].descriptorCount = 1;
+                raytrace_layout_bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                raytrace_layout_bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                raytrace_layout_bindings[4].binding = 4;
+                raytrace_layout_bindings[4].descriptorCount = 1;
+                raytrace_layout_bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                raytrace_layout_bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                raytrace_layout_bindings[5].binding = 5;
+                raytrace_layout_bindings[5].descriptorCount = 1;
+                raytrace_layout_bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                raytrace_layout_bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
                 descriptor_set_layout_create_info.bindingCount = countof (raytrace_layout_bindings);
                 descriptor_set_layout_create_info.pBindings = raytrace_layout_bindings;
 
                 memset (&vulkan_globals.raytrace_set_layout, 0, sizeof (vulkan_globals.raytrace_set_layout));
-                vulkan_globals.raytrace_set_layout.num_storage_images = 1;
+                vulkan_globals.raytrace_set_layout.num_storage_images = 2;
+                vulkan_globals.raytrace_set_layout.num_combined_image_samplers = 1;
+                vulkan_globals.raytrace_set_layout.num_storage_buffers = 2;
+                vulkan_globals.raytrace_set_layout.num_acceleration_structures = 1;
 
                 err = vkCreateDescriptorSetLayout (
                         vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.raytrace_set_layout.handle);
