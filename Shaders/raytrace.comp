@@ -2,102 +2,355 @@
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_ARB_shading_language_420pack : enable
 #extension GL_EXT_ray_query : enable
+#extension GL_EXT_ray_tracing_position_fetch : require
 
-layout (set = 0, binding = 0, rgb10_a2) uniform writeonly image2D output_image;
+// ---------------------- Descriptor set 0 ----------------------
+layout (set = 0, binding = 0, rgba16f) uniform writeonly image2D output_image;
 layout (set = 0, binding = 1) uniform accelerationStructureEXT tlas;
+layout (set = 0, binding = 2, rgba32f) uniform coherent image2D accum_image;
+// Optional HDR environment (equirectangular, linear HDR)
+layout (set = 0, binding = 3) uniform sampler2D env_tex;
 
-layout (push_constant) uniform PushConsts
-{
-        vec2  screen_size_rcp;
-        float aspect_ratio;
-        float origin_x;
-        float origin_y;
-        float origin_z;
-        float forward_x;
-        float forward_y;
-        float forward_z;
-        float right_x;
-        float right_y;
-        float right_z;
-        float down_x;
-        float down_y;
-        float down_z;
-}
-push_constants;
+// Optional: structured materials/lights SSBOs (leave unbound if not used)
+/*
+layout (set = 0, binding = 4, std430) readonly buffer Materials {
+    struct Material { vec3 baseColor; float roughness; float metallic; float emission; float ior; };
+    Material materials[];
+};
+layout (set = 0, binding = 5, std430) readonly buffer Lights {
+    // triangle lights/emissive instances - out of scope for brevity
+} lightsBuf;
+*/
 
 layout (local_size_x = 8, local_size_y = 8) in;
 
-const vec3 LIGHT_POSITION = vec3 (200.0f, 200.0f, 200.0f);
-const vec3 LIGHT_COLOR = vec3 (1.0f, 0.95f, 0.85f);
-const vec3 AMBIENT_COLOR = vec3 (0.05f);
-
-vec3 base_color_from_primitive (uint primitive_index)
+// ---------------------- Push constants ----------------------
+layout (push_constant) uniform PushConsts
 {
-        const vec3 palette[5] = vec3[](vec3 (0.75f, 0.30f, 0.25f), vec3 (0.20f, 0.55f, 0.75f), vec3 (0.60f, 0.60f, 0.30f), vec3 (0.45f, 0.35f, 0.70f), vec3 (0.65f, 0.55f, 0.45f));
-        return palette[primitive_index % 5u];
+    vec2  screen_size_rcp;
+    float aspect_ratio;
+
+    float origin_x;  float origin_y;  float origin_z;
+    float forward_x; float forward_y; float forward_z;
+    float right_x;   float right_y;   float right_z;
+    float down_x;    float down_y;    float down_z;
+
+    // New: camera & exposure
+    float aperture;        // radius in world units (0 = pinhole)
+    float focus_distance;  // meters
+    float exposure;        // photographic exposure multiplier
+
+    uint  frame_index;     // progressive rendering counter (1..N)
+} pc;
+
+// ---------------------- Constants & helpers -------------------
+const float PI  = 3.14159265359;
+const float EPS = 1e-3;
+
+const vec3  LIGHT_POSITION = vec3(200.0, 200.0, 200.0);
+const vec3  LIGHT_COLOR    = vec3(1.0, 0.95, 0.85);
+const float LIGHT_INTENSITY= 50000.0; // lumen-ish scalar; tune with exposure
+
+// Hash & RNG (fast, per-pixel per-frame)
+uint lcg(inout uint s) { s = 1664525u * s + 1013904223u; return s; }
+float rand(inout uint s) { return float(lcg(s) >> 8) * (1.0 / 16777216.0); }
+uint  pcg_hash(uvec2 v) {
+    uint x = v.x * 0x9E3779B9u ^ v.y;
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
 }
 
-void main ()
+// ACES-ish tonemapper (Hable)
+vec3 tonemapACES(vec3 x) {
+    const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+    return clamp((x*(a*x + b)) / (x*(c*x + d) + e), 0.0, 1.0);
+}
+
+// Build ONB around a normal
+void onb(in vec3 n, out vec3 t, out vec3 b) {
+    if (abs(n.z) > 0.999f) { t = vec3(1,0,0); }
+    else { t = normalize(cross(vec3(0,0,1), n)); }
+    b = cross(n, t);
+}
+
+// Cosine hemisphere sampling
+vec3 cosineSampleHemisphere(in vec2 u) {
+    float r = sqrt(u.x);
+    float theta = 2.0 * PI * u.y;
+    float x = r * cos(theta);
+    float y = r * sin(theta);
+    float z = sqrt(max(0.0, 1.0 - x*x - y*y));
+    return vec3(x, y, z);
+}
+
+// Concentric disk sampling (thin lens)
+vec2 concentricSampleDisk(vec2 u) {
+    float sx = 2.0*u.x - 1.0;
+    float sy = 2.0*u.y - 1.0;
+    if (sx == 0.0 && sy == 0.0) return vec2(0.0);
+    float r, theta;
+    if (abs(sx) > abs(sy)) { r = sx; theta = (PI/4.0) * (sy/sx); }
+    else { r = sy; theta = (PI/2.0) - (PI/4.0) * (sx/sy); }
+    return r * vec2(cos(theta), sin(theta));
+}
+
+// GGX helpers
+float D_GGX(float NoH, float a2) {
+    float d = (NoH * NoH) * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+float G_SchlickGGX(float NoV, float k) { return NoV / (NoV * (1.0 - k) + k); }
+float G_Smith(float NoV, float NoL, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r*r) / 8.0;
+    return G_SchlickGGX(NoV, k) * G_SchlickGGX(NoL, k);
+}
+vec3  F_Schlick(vec3 F0, float HoV) {
+    float f = pow(1.0 - HoV, 5.0);
+    return F0 + (1.0 - F0) * f;
+}
+
+// Sample GGX half-vector and reflect
+vec3 sampleGGX(vec2 u, float roughness, vec3 n, vec3 v, out float pdf) {
+    float a  = max(0.001, roughness*roughness);
+    float a2 = a*a;
+    float phi = 2.0 * PI * u.x;
+    float cosTheta = sqrt((1.0 - u.y) / (1.0 + (a2 - 1.0) * u.y));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta*cosTheta));
+
+    vec3 t, b; onb(n, t, b);
+    vec3 h = normalize(t * (cos(phi)*sinTheta) + b * (sin(phi)*sinTheta) + n * cosTheta);
+    vec3 l = reflect(-v, h);
+
+    float NoH = max(dot(n, h), 0.0);
+    float LoH = max(dot(l, h), 0.0);
+    // pdf for reflected direction when sampling H
+    float D = D_GGX(NoH, a2);
+    pdf = max(EPS, D * NoH / max(4.0 * LoH, EPS));
+    return l;
+}
+
+// Simple palette fallback (when no material buffer is bound)
+vec3 base_color_from_primitive(uint primitive_index) {
+    const vec3 palette[5] = vec3[](
+        vec3(0.75, 0.30, 0.25), vec3(0.20, 0.55, 0.75),
+        vec3(0.60, 0.60, 0.30), vec3(0.45, 0.35, 0.70),
+        vec3(0.65, 0.55, 0.45)
+    );
+    return palette[primitive_index % 5u];
+}
+
+// Environment lookup (equirectangular; X right, Y up, Z forward)
+vec3 environment(vec3 dir) {
+    // If no env bound, return faint bluish sky
+    // (sampler2D default returns black if unbound on most drivers; this protects against that)
+    #ifdef FORCE_SKY_FALLBACK
+    return mix(vec3(0.65,0.80,1.0), vec3(0.02,0.02,0.02), pow(max(dir.y*0.5+0.5, 0.0), 2.0));
+    #else
+    vec2 uv;
+    uv.x = (atan(dir.z, dir.x) / (2.0*PI)) + 0.5;
+    uv.y = 0.5 - asin(clamp(dir.y, -1.0, 1.0))/PI;
+    return texture(env_tex, uv).rgb;
+    #endif
+}
+
+// Ray query wrapper: closest hit
+bool traceClosest(in vec3 ro, in vec3 rd,
+                  out float t, out vec3 n, out uint prim, out uint inst, out vec3 hitPos)
 {
-        const uint pos_x = gl_GlobalInvocationID.x;
-        const uint pos_y = gl_GlobalInvocationID.y;
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas,
+        gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+        0xFF, ro, EPS, rd, 1e30);
 
-        vec3 color = vec3 (0.02f, 0.02f, 0.04f);
+    while (rayQueryProceedEXT(rq)) { }
 
-        const float pos_x_unit = ((float (pos_x) * push_constants.screen_size_rcp.x) * 2.0f) - 1.0f;
-        const float pos_y_unit = ((float (pos_y) * push_constants.screen_size_rcp.y) * 2.0f) - 1.0f;
-        const vec3 origin = vec3 (push_constants.origin_x, push_constants.origin_y, push_constants.origin_z);
-        const vec3 forward = vec3 (push_constants.forward_x, push_constants.forward_y, push_constants.forward_z);
-        const vec3 right = vec3 (push_constants.right_x, push_constants.right_y, push_constants.right_z) * push_constants.aspect_ratio;
-        const vec3 down = vec3 (push_constants.down_x, push_constants.down_y, push_constants.down_z);
-        const vec3 direction = normalize (forward + (right * pos_x_unit) + (down * pos_y_unit));
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        t = rayQueryGetIntersectionTEXT(rq, true);
+        vec3 v[3];
+        rayQueryGetIntersectionTriangleVertexPositionsEXT(rq, true, v);
 
-        rayQueryEXT ray_query;
-        rayQueryInitializeEXT (ray_query, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 1e-3f, direction, 1e30f);
+        vec3 n_obj = normalize(cross(v[1]-v[0], v[2]-v[0]));
+        mat3 w2o = mat3(rayQueryGetIntersectionWorldToObjectEXT(rq, true));
+        vec3 nrm = normalize(transpose(w2o) * n_obj);
 
-        while (rayQueryProceedEXT (ray_query))
-        {
+        hitPos = ro + rd * t;
+        // Make the normal oppose the ray (consistent orientation)
+        n = faceforward(nrm, rd, nrm);
+        prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+        inst = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+        return true;
+    }
+    return false;
+}
+
+// Visibility for shadow rays
+bool visible(in vec3 ro, in vec3 rd, float dist) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas,
+        gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        0xFF, ro, EPS, rd, dist - 2.0*EPS);
+    while (rayQueryProceedEXT(rq)) { }
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// ---------------------- Main ----------------------
+void main()
+{
+    const uvec2 pix = gl_GlobalInvocationID.xy;
+    const vec2  pxf = vec2(pix);
+
+    // RNG seed: pixel, frame
+    uint seed = pcg_hash(pix ^ uvec2(pc.frame_index, pc.frame_index*16699u));
+
+    // Subpixel jitter for AA
+    vec2 jitter = vec2(rand(seed), rand(seed));
+    vec2 ndc = ((pxf + jitter) * pc.screen_size_rcp) * 2.0 - 1.0;
+
+    // Camera basis
+    vec3 origin  = vec3(pc.origin_x,  pc.origin_y,  pc.origin_z);
+    vec3 forward = vec3(pc.forward_x, pc.forward_y, pc.forward_z);
+    vec3 right   = vec3(pc.right_x,   pc.right_y,   pc.right_z) * pc.aspect_ratio;
+    vec3 down    = vec3(pc.down_x,    pc.down_y,    pc.down_z);
+
+    // Primary ray (pre-DOF)
+    vec3 dir = normalize(forward + right * ndc.x + down * ndc.y);
+
+    // Thin-lens depth-of-field
+    if (pc.aperture > 0.0 && pc.focus_distance > 0.0) {
+        vec3 focus_point = origin + dir * pc.focus_distance;
+        vec2 lens = concentricSampleDisk(vec2(rand(seed), rand(seed))) * pc.aperture;
+        // Build camera "lens plane" basis
+        vec3 camUp = -down; // your push has "down"
+        vec3 lens_right = normalize(right);
+        vec3 lens_up    = normalize(camUp);
+        origin += lens_right * lens.x + lens_up * lens.y;
+        dir = normalize(focus_point - origin);
+    }
+
+    // Path tracer
+    vec3 radiance  = vec3(0.0);
+    vec3 throughput= vec3(1.0);
+
+    vec3 ro = origin;
+    vec3 rd = dir;
+
+    const int MAX_BOUNCES = 8;
+    for (int bounce = 0; bounce < MAX_BOUNCES; ++bounce)
+    {
+        float t; vec3 n; uint prim; uint inst; vec3 hp;
+        if (!traceClosest(ro, rd, t, n, prim, inst, hp)) {
+            // Miss: environment
+            radiance += throughput * environment(rd);
+            break;
         }
 
-        if (rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-        {
-                const float distance = rayQueryGetIntersectionTEXT (ray_query, true);
-                const vec3 hit_position = origin + direction * distance;
+        // --- Fetch / synthesize material ---
+        // (Replace with SSBO lookups if you wire materials in binding=4)
+        vec3  baseColor = base_color_from_primitive(prim);
+        float roughness = clamp(0.15 + 0.7 * fract(float(prim) * 0.61803), 0.05, 0.95);
+        float metallic  = step(0.65, fract(float(prim) * 0.38197));
+        float emission  = 0.0; // set >0 to make emissive primitives
+        float ior       = 1.5;
 
-                vec3 v0;
-                vec3 v1;
-                vec3 v2;
-                rayQueryGetIntersectionTriangleVertexPositionsEXT (ray_query, true, v0, v1, v2);
-
-                const vec3 object_normal = normalize (cross (v1 - v0, v2 - v0));
-                const mat3 world_to_object = mat3 (rayQueryGetIntersectionWorldToObjectEXT (ray_query, true));
-                const mat3 normal_matrix = transpose (world_to_object);
-                const vec3 normal = normalize (normal_matrix * object_normal);
-
-                const vec3 light_vector = LIGHT_POSITION - hit_position;
-                const float light_distance = length (light_vector);
-                const vec3 light_direction = light_vector / max (light_distance, 1e-3f);
-
-                float shadow = 1.0f;
-                rayQueryEXT shadow_query;
-                const vec3 shadow_origin = hit_position + normal * 1e-2f;
-                rayQueryInitializeEXT (
-                        shadow_query, tlas,
-                        gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                        0xFF, shadow_origin, 1e-3f, light_direction, light_distance - 2e-2f);
-                while (rayQueryProceedEXT (shadow_query))
-                {
-                }
-                if (rayQueryGetIntersectionTypeEXT (shadow_query, true) != gl_RayQueryCommittedIntersectionNoneEXT)
-                {
-                        shadow = 0.0f;
-                }
-
-                const vec3 base_color = base_color_from_primitive (rayQueryGetIntersectionPrimitiveIndexEXT (ray_query, true));
-                const float ndotl = max (dot (normal, light_direction), 0.0f);
-                const float attenuation = 1.0f / (1.0f + 0.01f * light_distance);
-                color = AMBIENT_COLOR * base_color + base_color * LIGHT_COLOR * ndotl * attenuation * shadow;
+        // Emissive hit (area light)
+        if (emission > 0.0) {
+            radiance += throughput * baseColor * emission;
+            break; // terminate at light
         }
 
-        imageStore (output_image, ivec2 (pos_x, pos_y), vec4 (clamp (color, 0.0f, 1.0f), 1.0f));
+        // Direct lighting: single point light (visible test)
+        {
+            vec3 L  = LIGHT_POSITION - hp;
+            float d = length(L);
+            L      /= max(d, EPS);
+            float NoL = max(dot(n, L), 0.0);
+            if (NoL > 0.0 && visible(hp + n * (2.0*EPS), L, d)) {
+                // Evaluate BRDF for this L
+                vec3 V  = -rd;
+                vec3 H  = normalize(V + L);
+                float NoV = max(dot(n, V), 0.0);
+                float NoH = max(dot(n, H), 0.0);
+                float LoH = max(dot(L, H), 0.0);
+
+                vec3  F0 = mix(vec3(0.04), baseColor, metallic);
+                vec3  F  = F_Schlick(F0, LoH);
+                float a  = max(0.001, roughness*roughness);
+                float a2 = a*a;
+                float D  = D_GGX(NoH, a2);
+                float G  = G_Smith(NoV, NoL, roughness);
+
+                vec3  spec = (D * G * F) / max(4.0 * NoV * NoL, EPS);
+                vec3  diff = (1.0 - metallic) * baseColor / PI;
+
+                vec3  f = diff + spec; // energy-conserving Disney approx; okay for demo
+                vec3  Li = LIGHT_COLOR * (LIGHT_INTENSITY / max(d*d, EPS));
+                radiance += throughput * f * Li * NoL;
+            }
+        }
+
+        // --- Sample next direction from BRDF (MIS-ready lobe sampling) ---
+        vec3 V = -rd;
+        float specProb;
+        {
+            vec3 F0 = mix(vec3(0.04), baseColor, metallic);
+            // Use average Fresnel as the specular sampling weight
+            float avgF0 = (F0.r + F0.g + F0.b) / 3.0;
+            specProb = clamp(avgF0 + roughness*0.25, 0.05, 0.95);
+        }
+
+        float pdf;
+        vec3  Ldir;
+        bool  sampledSpec = rand(seed) < specProb;
+        if (sampledSpec) {
+            // Specular GGX sample
+            Ldir = sampleGGX(vec2(rand(seed), rand(seed)), roughness, n, V, pdf);
+            pdf *= specProb;
+            // If below the surface, kill
+            if (dot(n, Ldir) <= 0.0) break;
+            // Evaluate specular BRDF
+            vec3  H  = normalize(V + Ldir);
+            float NoV = max(dot(n, V),     0.0);
+            float NoL = max(dot(n, Ldir),  0.0);
+            float NoH = max(dot(n, H),     0.0);
+            float LoH = max(dot(Ldir, H),  0.0);
+            vec3  F0 = mix(vec3(0.04), baseColor, metallic);
+            vec3  F  = F_Schlick(F0, LoH);
+            float a  = max(0.001, roughness*roughness);
+            float D  = D_GGX(NoH, a*a);
+            float G  = G_Smith(NoV, NoL, roughness);
+            vec3  spec = (D * G * F) / max(4.0 * NoV * NoL, EPS);
+            throughput *= spec * NoL / max(pdf, EPS);
+        } else {
+            // Diffuse cosine hemisphere
+            vec3 t, b; onb(n, t, b);
+            vec3 lLocal = cosineSampleHemisphere(vec2(rand(seed), rand(seed)));
+            Ldir = normalize(t * lLocal.x + b * lLocal.y + n * lLocal.z);
+            pdf  = (dot(n, Ldir) * (1.0 / PI)) * (1.0 - specProb);
+            vec3 diff = (1.0 - metallic) * baseColor / PI;
+            float NoL = max(dot(n, Ldir), 0.0);
+            throughput *= diff * NoL / max(pdf, EPS);
+        }
+
+        // Spawn next path segment
+        ro = hp + Ldir * (2.0 * EPS);
+        rd = Ldir;
+
+        // Russian roulette after a few bounces
+        if (bounce >= 3) {
+            float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+            if (rand(seed) > p) break;
+            throughput /= p;
+        }
+    }
+
+    // Progressive accumulation
+    vec4 acc = (pc.frame_index > 1u) ? imageLoad(accum_image, ivec2(pix)) : vec4(0.0);
+    acc.rgb += radiance;
+    acc.a   += 1.0;
+    imageStore(accum_image, ivec2(pix), acc);
+
+    vec3 avg = acc.rgb / max(acc.a, 1.0);
+    vec3 mapped = tonemapACES(avg * pc.exposure);
+    imageStore(output_image, ivec2(pix), vec4(mapped, 1.0));
 }
