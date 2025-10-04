@@ -104,6 +104,39 @@ static VkDeviceAddress	   bmodel_indices_device_address;
 static VkBuffer			   bmodel_scratch_buffer;
 static VkDeviceAddress	   bmodel_scratch_address;
 static vulkan_memory_t	   bmodel_as_device_memory;
+static atomic_uint32_t	   bmodel_tlas_revision;
+static uint32_t		   bmodel_tlas_last_hash;
+
+static uint32_t RaytraceHashCombine32 (uint32_t hash, uint32_t value)
+{
+	hash ^= value;
+	hash *= 16777619u; // FNV-1a prime
+	return hash;
+}
+
+static uint32_t RaytraceHashInstance (uint32_t hash, const VkAccelerationStructureInstanceKHR *instance)
+{
+	uint32_t matrix_bits[12];
+	memcpy (matrix_bits, instance->transform.matrix, sizeof (matrix_bits));
+	for (int i = 0; i < 12; ++i)
+		hash = RaytraceHashCombine32 (hash, matrix_bits[i]);
+
+	hash = RaytraceHashCombine32 (hash, instance->instanceCustomIndex);
+	hash = RaytraceHashCombine32 (hash, instance->mask);
+	hash = RaytraceHashCombine32 (hash, instance->instanceShaderBindingTableRecordOffset);
+	hash = RaytraceHashCombine32 (hash, instance->flags);
+
+	const uint64_t as_ref = instance->accelerationStructureReference;
+	hash = RaytraceHashCombine32 (hash, (uint32_t)(as_ref & 0xFFFFFFFFu));
+	hash = RaytraceHashCombine32 (hash, (uint32_t)(as_ref >> 32));
+
+	return hash;
+}
+
+uint32_t R_BModelTLASRevision (void)
+{
+	return Atomic_LoadUInt32 (&bmodel_tlas_revision);
+}
 
 extern cvar_t r_showtris;
 extern cvar_t r_simd;
@@ -2043,6 +2076,8 @@ void GL_DeleteBModelAccelerationStructures (void)
 	}
 	R_FreeBuffers (num_buffers, buffers, &bmodel_as_device_memory, &num_vulkan_bmodel_allocations);
 	bmodel_tlas = VK_NULL_HANDLE;
+	Atomic_StoreUInt32 (&bmodel_tlas_revision, 0u);
+	bmodel_tlas_last_hash = 0;
 	bmodel_tlas_buffer = VK_NULL_HANDLE;
 	bmodel_tlas_size = 0;
 	bmodel_indices_buffer = VK_NULL_HANDLE;
@@ -2398,6 +2433,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		num_instances * sizeof (VkAccelerationStructureInstanceKHR), NULL, NULL, &instances_device_address);
 
 	num_instances = 0;
+	uint32_t scene_hash = 2166136261u;
 	for (int i = 0; i < cl.num_entities + cl.num_statics; ++i)
 	{
 		entity_t *e = (i < cl.num_entities) ? &cl.entities[i] : cl.static_entities[i - cl.num_entities];
@@ -2414,6 +2450,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 			R_RotateForEntity (model_matrix, e->origin, e_angles, e->netstate.scale);
 
 		VkAccelerationStructureInstanceKHR *instance = &instances[num_instances];
+		memset (instance, 0, sizeof (*instance));
 		instance->transform.matrix[0][0] = model_matrix[0];
 		instance->transform.matrix[0][1] = model_matrix[4];
 		instance->transform.matrix[0][2] = model_matrix[8];
@@ -2432,7 +2469,14 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		instance->flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR | VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		instance->accelerationStructureReference = e->model->blas_address;
 
+		scene_hash = RaytraceHashInstance (scene_hash, instance);
 		++num_instances;
+	}
+
+	if (scene_hash != bmodel_tlas_last_hash)
+	{
+		bmodel_tlas_last_hash = scene_hash;
+		Atomic_IncrementUInt32 (&bmodel_tlas_revision);
 	}
 
 	ZEROED_STRUCT (VkAccelerationStructureGeometryKHR, tlas_geometry);
