@@ -33,7 +33,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "SDL_syswm.h"
 #include "SDL_vulkan.h"
 #include "menu.h"
-#include "gl_trace_ray.h"
+#include "gl_raytrace.h"
 #ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
 #endif
@@ -106,7 +106,7 @@ cvar_t		  vid_fsaamode = {"vid_fsaamode", "0", CVAR_ARCHIVE};
 cvar_t		  vid_gamma = {"gamma", "0.9", CVAR_ARCHIVE};		// johnfitz -- moved here from view.c
 cvar_t		  vid_contrast = {"contrast", "1.4", CVAR_ARCHIVE}; // QuakeSpasm, MarkV
 cvar_t		  r_usesops = {"r_usesops", "1", CVAR_ARCHIVE};		// johnfitz
-static cvar_t r_raydebug = {"r_raydebug", "0", 0};
+static cvar_t r_raytrace = {"r_raytrace", "0", 0};
 
 static VkInstance				vulkan_instance;
 static VkPhysicalDevice			vulkan_physical_device;
@@ -1917,7 +1917,7 @@ void GL_UpdateDescriptorSets (void)
 
         if (vulkan_globals.ray_query && bmodel_tlas)
         {
-                GL_TraceRay_UpdateDescriptorSet (&output_image_info, bmodel_tlas);
+                GL_Raytrace_UpdateDescriptorSet (&output_image_info, bmodel_tlas);
         }
 }
 
@@ -2575,7 +2575,7 @@ typedef struct end_rendering_parms_s
 	qboolean render_warp   : 1;
 	qboolean vid_palettize : 1;
 	qboolean menu		   : 1;
-	qboolean ray_debug	   : 1;
+	qboolean raytrace	   : 1;
 	uint32_t render_scale  : 4;
 	uint32_t vid_height	   : 20;
 	float	 time;
@@ -2643,9 +2643,9 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 		GL_SetCanvas (cbx, CANVAS_NONE); // Invalidate canvas so push constants get set later
 
                 vulkan_pipeline_t *pipeline = NULL;
-                if (parms->ray_debug && (vulkan_globals.ray_debug_pipeline.handle != VK_NULL_HANDLE))
+                if (parms->raytrace && (vulkan_globals.raytrace_pipeline.handle != VK_NULL_HANDLE))
                 {
-                        pipeline = &vulkan_globals.ray_debug_pipeline;
+                        pipeline = &vulkan_globals.raytrace_pipeline;
                 }
                 else if (parms->render_scale >= 2)
                 {
@@ -2662,9 +2662,9 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
 
                 R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 
-                if (parms->ray_debug && vulkan_globals.ray_query && bmodel_tlas)
+                if (parms->raytrace && vulkan_globals.ray_query && bmodel_tlas)
                 {
-                        const gl_trace_ray_constants_t push_constants = {
+                        const gl_raytrace_constants_t push_constants = {
                                 1.0f / (float)parms->vid_width,
                                 1.0f / (float)parms->vid_height,
                                 (float)parms->vid_width / (float)parms->vid_height,
@@ -2681,7 +2681,7 @@ static void GL_ScreenEffects (cb_context_t *cbx, qboolean enabled, end_rendering
                                 parms->down[1],
                                 parms->down[2],
                         };
-                        GL_TraceRay_Render (cbx, parms->vid_width, parms->vid_height, &push_constants);
+                        GL_Raytrace_Render (cbx, parms->vid_width, parms->vid_height, &push_constants);
                 }
                 else
                 {
@@ -2916,7 +2916,7 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
 	clear_values[2] = vulkan_globals.color_clear_value;
 
 	const qboolean screen_effects = parms->render_warp || (parms->render_scale >= 2) || parms->vid_palettize || (gl_polyblend.value && parms->v_blend[3]) ||
-									parms->menu || parms->ray_debug;
+									parms->menu || parms->raytrace;
 	{
 		const qboolean resolve = (vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 		ZEROED_STRUCT (VkRenderPassBeginInfo, render_pass_begin_info);
@@ -3035,8 +3035,8 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
 		.render_warp = render_warp,
 		.vid_palettize = vid_palettize.value != 0,
 		.menu = key_dest == key_menu,
-                .ray_debug = r_raydebug.value && (bmodel_tlas != VK_NULL_HANDLE) &&
-                             (vulkan_globals.ray_debug_pipeline.handle != VK_NULL_HANDLE),
+                .raytrace = r_raytrace.value && (bmodel_tlas != VK_NULL_HANDLE) &&
+                             (vulkan_globals.raytrace_pipeline.handle != VK_NULL_HANDLE),
 		.render_scale = CLAMP (0, render_scale, 8),
 		.vid_width = vid.width,
 		.vid_height = vid.height,
@@ -3300,7 +3300,7 @@ void VID_Init (void)
 	Cvar_RegisterVariable (&vid_desktopfullscreen); // QuakeSpasm
 	Cvar_RegisterVariable (&vid_borderless);		// QuakeSpasm
 	Cvar_RegisterVariable (&vid_palettize);
-        Cvar_RegisterVariable (&r_raydebug);
+        Cvar_RegisterVariable (&r_raytrace);
 	Cvar_SetCallback (&vid_fullscreen, VID_Changed_f);
 	Cvar_SetCallback (&vid_width, VID_Changed_f);
 	Cvar_SetCallback (&vid_height, VID_Changed_f);

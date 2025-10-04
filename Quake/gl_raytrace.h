@@ -1,9 +1,9 @@
-#ifndef GL_TRACE_RAY_H
-#define GL_TRACE_RAY_H
+#ifndef GL_RAYTRACE_H
+#define GL_RAYTRACE_H
 
 #include "quakedef.h"
 
-typedef struct gl_trace_ray_constants_s
+typedef struct gl_raytrace_constants_s
 {
         float screen_size_rcp_x;
         float screen_size_rcp_y;
@@ -20,9 +20,9 @@ typedef struct gl_trace_ray_constants_s
         float down_x;
         float down_y;
         float down_z;
-} gl_trace_ray_constants_t;
+} gl_raytrace_constants_t;
 
-void GL_TraceRay_UpdateDescriptorSet (const VkDescriptorImageInfo *output_image_info, VkAccelerationStructureKHR tlas);
-void GL_TraceRay_Render (cb_context_t *cbx, int width, int height, const gl_trace_ray_constants_t *constants);
+void GL_Raytrace_UpdateDescriptorSet (const VkDescriptorImageInfo *output_image_info, VkAccelerationStructureKHR tlas);
+void GL_Raytrace_Render (cb_context_t *cbx, int width, int height, const gl_raytrace_constants_t *constants);
 
-#endif /* GL_TRACE_RAY_H */
+#endif /* GL_RAYTRACE_H */

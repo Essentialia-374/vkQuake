@@ -57,7 +57,7 @@ DECLARE_SHADER_SPV (update_lightmap_8bit_comp);
 DECLARE_SHADER_SPV (update_lightmap_8bit_rt_comp);
 DECLARE_SHADER_SPV (update_lightmap_10bit_comp);
 DECLARE_SHADER_SPV (update_lightmap_10bit_rt_comp);
-DECLARE_SHADER_SPV (ray_debug_comp);
+DECLARE_SHADER_SPV (raytrace_comp);
 
 #undef DECLARE_SHADER_SPV
 

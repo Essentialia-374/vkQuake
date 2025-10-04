@@ -165,7 +165,7 @@ SHADER_OBJS = \
 	update_lightmap_8bit_rt_comp.o \
 	update_lightmap_10bit_comp.o \
 	update_lightmap_10bit_rt_comp.o \
-	ray_debug_comp.o
+        raytrace_comp.o
 
 GLOBJS = \
 	palette.o \
@@ -178,7 +178,7 @@ GLOBJS = \
 	r_part_fte.o \
 	r_world.o \
 	gl_screen.o \
-	gl_trace_ray.o \
+        gl_raytrace.o \
 	gl_sky.o \
 	gl_warp.o \
 	$(SYSOBJ_GL_VID) \
