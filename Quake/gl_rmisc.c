@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "gl_heap.h"
+#include "gl_raytrace.h"
 #include <float.h>
 
 cvar_t r_lodbias = {"r_lodbias", "1", CVAR_ARCHIVE};
@@ -1873,7 +1874,7 @@ void R_CreatePipelineLayouts ()
 
                 ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
                 push_constant_range.offset = 0;
-                push_constant_range.size = 15 * sizeof (float);
+                push_constant_range.size = sizeof (gl_raytrace_constants_t);
                 push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
                 ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);

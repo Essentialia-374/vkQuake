@@ -27,6 +27,7 @@ typedef struct gl_raytrace_constants_s
 	float	 focus_distance; // meters
 	float	 exposure;		 // multiplier for tonemapper
 	uint32_t frame_index;	 // progressive sample index (1..N)
+	uint32_t rng_seed;	 // per-dispatch random seed (monotonic)
 } gl_raytrace_constants_t;
 
 // NEW signature: add accumulation & environment, optional material/light buffers

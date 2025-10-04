@@ -41,6 +41,7 @@ layout (push_constant) uniform PushConsts
     float exposure;        // photographic exposure multiplier
 
     uint  frame_index;     // progressive rendering counter (1..N)
+    uint  rng_seed;        // monotonic seed so motion keeps fresh noise
 } pc;
 
 // ---------------------- Constants & helpers -------------------
@@ -200,8 +201,8 @@ void main()
     const uvec2 pix = gl_GlobalInvocationID.xy;
     const vec2  pxf = vec2(pix);
 
-    // RNG seed: pixel, frame
-    uint seed = pcg_hash(pix ^ uvec2(pc.frame_index, pc.frame_index*16699u));
+    // RNG seed: pixel, frame (use separate seed so motion isn't frozen noise)
+    uint seed = pcg_hash(pix ^ uvec2(pc.rng_seed, pc.rng_seed * 16699u));
 
     // Subpixel jitter for AA
     vec2 jitter = vec2(rand(seed), rand(seed));
